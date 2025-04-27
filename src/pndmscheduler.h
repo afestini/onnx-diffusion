@@ -5,6 +5,7 @@
 #include <onnxruntime_cxx_api.h>
 
 
+template<typename DataType>
 class PNDMScheduler {
 public:
     PNDMScheduler(size_t num_train_timesteps = 1000,
@@ -21,21 +22,21 @@ public:
 
     size_t get_steps_offset() { return steps_offset; };
 
-    void step(std::span<Ort::Float16_t> model_output, int64_t timestep, std::span<Ort::Float16_t> sample);
+    void step(std::span<DataType> model_output, int64_t timestep, std::span<DataType> sample);
 
-    void add_noise_to_sample(std::span<Ort::Float16_t> samples, std::span<const Ort::Float16_t> noise, int64_t timesteps);
+    void add_noise_to_sample(std::span<DataType> samples, std::span<const DataType> noise, int64_t timesteps);
 
-    void scale_model_input(std::span<Ort::Float16_t> sample, int64_t ts);
+    void scale_model_input(std::span<DataType> sample, int64_t ts);
 
     float init_noise_sigma() const { return _init_noise_sigma; }
 
     std::vector<int64_t> timesteps() { return _timesteps; }
 
 private:
-    void step_plms(std::span<Ort::Float16_t> model_output, int64_t timestep, std::span<Ort::Float16_t> sample);
+    void step_plms(std::span<DataType> model_output, int64_t timestep, std::span<DataType> sample);
 
-    void _get_prev_sample(std::span<Ort::Float16_t> sample, int64_t timestep, int64_t prev_timestep,
-                          std::span<const Ort::Float16_t> model_output);
+    void _get_prev_sample(std::span<DataType> sample, int64_t timestep, int64_t prev_timestep,
+                          std::span<const DataType> model_output);
 
     std::vector<float> _betas;
     std::vector<float> _alphas;
@@ -49,7 +50,7 @@ private:
     std::vector<int64_t> _plms_timesteps;
 
     std::deque<std::vector<float>> _ets;
-    std::vector<Ort::Float16_t> _cur_sample;
+    std::vector<DataType> _cur_sample;
 
     int64_t _counter = 0;
 

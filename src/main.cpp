@@ -22,6 +22,13 @@ using namespace std;
 static constexpr int64_t image_dim = 512;
 
 
+template<typename T>
+static consteval ONNXTensorElementDataType GetONNXType() {
+    if constexpr (is_same_v<T, float>) return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+    if constexpr (is_same_v<T, Ort::Float16_t>) ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+}
+
+
 static void AddTensorRT(Ort::SessionOptions& session_options) {
     OrtTensorRTProviderOptions options {};
     options.device_id = 0;
@@ -76,24 +83,25 @@ static Ort::Value CopyTensor(const Ort::Value& tensor, const Ort::AllocatorWithD
 }
 
 
-static void RandomizeData(span<Ort::Float16_t> data) {
-    std::random_device rd;
+template<typename T>
+static void RandomizeData(span<T> data) {
+    //std::random_device rd;
     //std::mt19937 gen(rd());
     std::mt19937 gen(1234);
-    std::normal_distribution<float> dist(0.0f, 1.0f);
+    std::normal_distribution<float> dist(0.f, 1.f);
 
-    for (auto& val : data) val = static_cast<Ort::Float16_t>(dist(gen));
+    for (auto& val : data) val = static_cast<T>(dist(gen));
 }
 
 
+template<typename T>
 static void ConvertToImgAndSave(const Ort::Value& img, const string& filename) {
-    const auto data = img.GetTensorData<Ort::Float16_t>();
+    const auto data = TensorToSpan<T>(img, 0);
     const auto shape = img.GetTensorTypeAndShapeInfo().GetShape();
-    const auto size = img.GetTensorTypeAndShapeInfo().GetElementCount();
     const auto ch_size = shape[2] * shape[3];
 
-    vector<uint8_t> out_img(size);
-    for (const auto [ch, channel_pixels] : span(data, size) | views::chunk(ch_size) | views::enumerate) {
+    vector<uint8_t> out_img(data.size());
+    for (const auto [ch, channel_pixels] : data | views::chunk(ch_size) | views::enumerate) {
         for (const auto [idx, in] : channel_pixels | views::enumerate)
             out_img[idx * shape[1] + ch] = static_cast<uint8_t>((static_cast<float>(in) + 1.f) * 127.5f);
     }
@@ -116,6 +124,7 @@ static void ConvertToImgAndSave(span<const float> img, int w, int h, int comps, 
 }
 
 
+template<typename T>
 static Ort::Value LoadImgAndConvertToTensor(const string& filename, int comps, const Ort::AllocatorWithDefaultOptions& allocator) {
     int width = 0;
     int height = 0;
@@ -123,13 +132,13 @@ static Ort::Value LoadImgAndConvertToTensor(const string& filename, int comps, c
     uint8_t* img = stbi_load(filename.c_str(), &width, &height, &channels, comps);
 
     const vector<int64_t> shape { 1, comps, height, width };
-    auto tensor = Ort::Value::CreateTensor(allocator, shape.data(), shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
-    auto data = tensor.GetTensorMutableData<Ort::Float16_t>();
+    auto tensor = Ort::Value::CreateTensor(allocator, shape.data(), shape.size(), GetONNXType<T>());
+    auto data = tensor.GetTensorMutableData<T>();
     const auto ch_size = width * height;
 
     for (const auto [idx, in] : span(img, width * height * comps) | views::chunk(comps) | views::enumerate) {
         for (int64_t ch = 0; ch < comps; ++ch)
-            data[ch * ch_size + idx] = static_cast<Ort::Float16_t>((in[ch] / 127.f) - 1.f);
+            data[ch * ch_size + idx] = static_cast<T>((in[ch] / 127.f) - 1.f);
     }
 
     stbi_image_free(img);
@@ -137,9 +146,10 @@ static Ort::Value LoadImgAndConvertToTensor(const string& filename, int comps, c
 }
 
 
+template<typename T>
 static void DumpTensor(ostream& s, const Ort::Value& tensor) {
-    for (const Ort::Float16_t l1 : TensorToSpan<Ort::Float16_t>(tensor)) {
-        s << l1.ToFloat() << ' ';
+    for (const T l1 : TensorToSpan<T>(tensor)) {
+        s << static_cast<float>(l1) << ' ';
     }
     s << "\n\n";
 }
@@ -245,26 +255,28 @@ static Ort::Value TokenizeAndPadPrompt(const string& prompt, int64_t padded_size
 }
 
 
+template<typename T>
 static Ort::Value EncodePromptTokens(Model& text_encoder, const Ort::Value& tokens) {
     const auto uncond_encoded = text_encoder.Run(text_encoder.input_names, { &tokens });
-    return CopyTensor<Ort::Float16_t>(uncond_encoded[0], text_encoder.allocator);
+    return CopyTensor<T>(uncond_encoded[0], text_encoder.allocator);
 }
 
 
+template<typename T>
 static Ort::Value CreateLatents(Ort::AllocatorWithDefaultOptions& allocator, Model& vae_encoder) {
     std::vector<int64_t> latent_shape = { 2, 4, image_dim / 8, image_dim / 8 };
-    Ort::Value latent = Ort::Value::CreateTensor(allocator, latent_shape.data(), latent_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
-    auto latent_data = TensorToSpan<Ort::Float16_t>(latent, 0);
+    Ort::Value latent = Ort::Value::CreateTensor(allocator, latent_shape.data(), latent_shape.size(), GetONNXType<T>());
+    auto latent_data = TensorToSpan<T>(latent, 0);
     if (true) {
-        RandomizeData(latent_data);
+        RandomizeData<T>(latent_data);
     }
     else {
         Ort::AllocatorWithDefaultOptions tmp_allocator;
-        const auto image = LoadImgAndConvertToTensor("input_512.png", 3, tmp_allocator);
+        const auto image = LoadImgAndConvertToTensor<T>("input_512.png", 3, tmp_allocator);
         auto in_latent = vae_encoder.Run(vae_encoder.input_names, { &image });
-        auto in_data = TensorToSpan<Ort::Float16_t>(in_latent[0]);
+        auto in_data = TensorToSpan<T>(in_latent[0]);
         for (auto& l : in_data)
-            l = Ort::Float16_t(l.ToFloat() * 0.18215f);
+            l = static_cast<T>(static_cast<float>(l) * 0.18215f);
 
         ranges::copy(in_data, latent_data.data());
     }
@@ -272,24 +284,26 @@ static Ort::Value CreateLatents(Ort::AllocatorWithDefaultOptions& allocator, Mod
 }
 
 
+template<typename T>
 static Ort::Value RunPrediction(Model& unet, const Ort::Value& latent, const Ort::Value& timestep, const Ort::Value& text_embeddings) {
     const auto prediction = unet.Run(unet.input_names, { &latent, &timestep, &text_embeddings });
-    return CopyTensor<Ort::Float16_t>(prediction[0], unet.allocator);
+    return CopyTensor<T>(prediction[0], unet.allocator);
 }
 
 
+template<typename T>
 static int run_inference(Model& tokenizer, Model& text_encoder, Model& unet, Model& vae_dec, Model& vae_enc) {
     const auto prompt_tokens = TokenizeAndPadPrompt("Dog", 77, tokenizer);
-    const auto embeddings = EncodePromptTokens(text_encoder, prompt_tokens);
+    const auto embeddings = EncodePromptTokens<T>(text_encoder, prompt_tokens);
 
-    auto latent = CreateLatents(unet.allocator, vae_enc);
-    const auto latents = TensorToSpan<Ort::Float16_t>(latent);
+    auto latent = CreateLatents<T>(unet.allocator, vae_enc);
+    const auto latents = TensorToSpan<T>(latent, 0);
 
     std::vector<int64_t> ts_shape = { 1 };
     auto timestep_tensor = Ort::Value::CreateTensor(unet.allocator, ts_shape.data(), ts_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
     auto& timestep = timestep_tensor.GetTensorMutableData<int64_t>()[0];
 
-    PNDMScheduler scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
+    PNDMScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
 
     scheduler.set_timesteps(30);
     const auto timesteps = scheduler.timesteps();
@@ -300,26 +314,26 @@ static int run_inference(Model& tokenizer, Model& text_encoder, Model& unet, Mod
 
         scheduler.scale_model_input(latents, t);
 
-        ranges::copy(TensorToSpan<Ort::Float16_t>(latent, 0), TensorToSpan<Ort::Float16_t>(latent, 1).data());
+        ranges::copy(TensorToSpan<T>(latent, 0), TensorToSpan<T>(latent, 1).data());
 
-        auto noise_predictions = RunPrediction(unet, latent, timestep_tensor, embeddings);
-        const auto pred_uncond = TensorToSpan<Ort::Float16_t>(noise_predictions, 0);
-        auto pred_cond = TensorToSpan<Ort::Float16_t>(noise_predictions, 1);
+        auto noise_predictions = RunPrediction<T>(unet, latent, timestep_tensor, embeddings);
+        const auto pred_uncond = TensorToSpan<T>(noise_predictions, 0);
+        auto pred_cond = TensorToSpan<T>(noise_predictions, 1);
 
         for (auto [np_cond, np_uncond] : views::zip(pred_cond, pred_uncond))
-            np_cond = Ort::Float16_t(np_uncond.ToFloat() + guidance_scale * (np_cond.ToFloat() - np_uncond.ToFloat()));
+            np_cond = static_cast<T>(static_cast<float>(np_uncond) + guidance_scale * (static_cast<float>(np_cond) - static_cast<float>(np_uncond)));
 
         scheduler.step(pred_cond, t, latents);
 
-        //auto tmp = CopyTensor<Ort::Float16_t>(latent, unet.allocator);
-        //for (auto& v : TensorToSpan<Ort::Float16_t>(tmp)) v = Ort::Float16_t(v.ToFloat() / 0.18215f);
+        //auto tmp = CopyTensor<T>(latent, unet.allocator);
+        //for (auto& v : TensorToSpan<T>(tmp)) v = static_cast<T>(static_cast<float>(v) / 0.18215f);
         //const auto img = vae_dec.Run(vae_dec.input_names, { &tmp });
         //ConvertToImgAndSave(img[0], format("out_{}.png", t));
     }
 
-    for (auto& v : latents) v = Ort::Float16_t(v.ToFloat() / 0.18215f);
+    for (auto& v : latents) v = static_cast<T>(static_cast<float>(v) / 0.18215f);
     const auto img = vae_dec.Run(vae_dec.input_names, { &latent });
-    ConvertToImgAndSave(img[0], "out.png");
+    ConvertToImgAndSave<T>(img[0], "out.png");
 
     return 0;
 }
@@ -335,15 +349,15 @@ int main(int argc, char* argv[]) {
 
         Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "");
 
-        const wstring root_dir = L"I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/";
-        //const wstring root_dir = L"I:/huggingface/hub/models--CompVis--stable-diffusion-v1-4/snapshots/da5601014c467b382fcf42019ba920a903f2103e/";
+        //const wstring root_dir = L"I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/";
+        const wstring root_dir = L"I:/huggingface/hub/models--CompVis--stable-diffusion-v1-4/snapshots/da5601014c467b382fcf42019ba920a903f2103e/";
         Model tokenizer(env,    L"I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/tokenizer/model.onnx");
         Model text_encoder(env, root_dir + L"text_encoder/model.onnx");
         Model unet(env,         root_dir + L"unet/model.onnx");
         Model vae_encoder(env,  root_dir + L"vae_encoder/model.onnx");
         Model vae_decoder(env,  root_dir + L"vae_decoder/model.onnx");
 
-        run_inference(tokenizer, text_encoder, unet, vae_decoder, vae_encoder);
+        run_inference<float>(tokenizer, text_encoder, unet, vae_decoder, vae_encoder);
     }
     catch (const Ort::Exception& e) {
         println("Exception ({}): {}", (int)e.GetOrtErrorCode(), e.what());

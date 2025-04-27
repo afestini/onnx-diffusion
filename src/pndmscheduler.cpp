@@ -27,7 +27,8 @@ static std::vector<float> cumprod(std::vector<float>& input) {
 }
 
 
-PNDMScheduler::PNDMScheduler(size_t num_train_timesteps,
+template<typename DataType>
+PNDMScheduler<DataType>::PNDMScheduler(size_t num_train_timesteps,
                              float beta_start,
                              float beta_end,
                              std::string beta_schedule,
@@ -76,7 +77,8 @@ PNDMScheduler::PNDMScheduler(size_t num_train_timesteps,
 }
 
 
-void PNDMScheduler::set_timesteps(size_t num_inference_steps) {
+template<typename DataType>
+void PNDMScheduler<DataType>::set_timesteps(size_t num_inference_steps) {
     _num_inference_steps = num_inference_steps;
 
     int step_ratio = static_cast<int>(_num_train_timesteps / num_inference_steps);
@@ -108,7 +110,8 @@ void PNDMScheduler::set_timesteps(size_t num_inference_steps) {
 }
 
 
-void PNDMScheduler::step(span<Ort::Float16_t> model_output, int64_t timestep, span<Ort::Float16_t> sample) {
+template<typename DataType>
+void PNDMScheduler<DataType>::step(span<DataType> model_output, int64_t timestep, span<DataType> sample) {
     if (_counter < ssize(_prk_timesteps) && !(_skip_prk_steps)) {
         throw std::invalid_argument("Not yet implemented step_prk method. Set skip_prk_steps to true for now.");
     }
@@ -118,7 +121,8 @@ void PNDMScheduler::step(span<Ort::Float16_t> model_output, int64_t timestep, sp
 }
 
 
-void PNDMScheduler::step_plms(span<Ort::Float16_t> model_output, int64_t timestep, span<Ort::Float16_t> sample) {
+template<typename DataType>
+void PNDMScheduler<DataType>::step_plms(span<DataType> model_output, int64_t timestep, span<DataType> sample) {
     if (!_num_inference_steps) {
         throw std::invalid_argument("Number of inference steps is 'None', you need to run 'set_timesteps' after creating the scheduler");
     }
@@ -148,7 +152,7 @@ void PNDMScheduler::step_plms(span<Ort::Float16_t> model_output, int64_t timeste
         const auto pEts = _ets.back().data();
 
         for (size_t i = 0; i < model_output.size(); i++)
-            model_output[i] = Ort::Float16_t((model_output[i].ToFloat() + pEts[i]) / 2.f);
+            model_output[i] = DataType((static_cast<float>(model_output[i]) + pEts[i]) / 2.f);
 
         ranges::copy(_cur_sample, sample.data());
     }
@@ -157,7 +161,7 @@ void PNDMScheduler::step_plms(span<Ort::Float16_t> model_output, int64_t timeste
         const auto pEtsM1 = _ets[1].data();
         const auto pEtsM2 = _ets[0].data();
         for (size_t i = 0; i < model_output.size(); i++)
-            model_output[i] = Ort::Float16_t((3.f * pEtsM1[i] - pEtsM2[i]) / 2.f);
+            model_output[i] = DataType((3.f * pEtsM1[i] - pEtsM2[i]) / 2.f);
     }
     else if (_ets.size() == 3) {
         //model_output = (23 * self.ets[-1] - 16 * self.ets[-2] + 5 * self.ets[-3]) / 12
@@ -165,7 +169,7 @@ void PNDMScheduler::step_plms(span<Ort::Float16_t> model_output, int64_t timeste
         const auto pEtsM2 = _ets[1].data();
         const auto pEtsM3 = _ets[0].data();
         for (size_t i = 0; i < model_output.size(); i++)
-            model_output[i] = Ort::Float16_t((23.f * pEtsM1[i] - 16.f * pEtsM2[i] + 5.f * pEtsM3[i]) / 12.f);
+            model_output[i] = DataType((23.f * pEtsM1[i] - 16.f * pEtsM2[i] + 5.f * pEtsM3[i]) / 12.f);
     }
     else {
         const auto pEtsM1 = (_ets.end() - 1)->data();
@@ -174,7 +178,7 @@ void PNDMScheduler::step_plms(span<Ort::Float16_t> model_output, int64_t timeste
         const auto pEtsM4 = (_ets.end() - 4)->data();
 
         for (size_t i = 0; i < model_output.size(); i++)
-            model_output[i] = Ort::Float16_t((1.f / 24.f) * (55.f * pEtsM1[i] - 59.f * pEtsM2[i] + 37.f * pEtsM3[i] - 9.f * pEtsM4[i]));
+            model_output[i] = DataType((1.f / 24.f) * (55.f * pEtsM1[i] - 59.f * pEtsM2[i] + 37.f * pEtsM3[i] - 9.f * pEtsM4[i]));
     }
 
     _get_prev_sample(sample, timestep, prev_timestep, model_output);
@@ -183,11 +187,13 @@ void PNDMScheduler::step_plms(span<Ort::Float16_t> model_output, int64_t timeste
 }
 
 
-void PNDMScheduler::scale_model_input(span<Ort::Float16_t> sample, int64_t ts) { /* no-op in case of PNDM */ }
+template<typename DataType>
+void PNDMScheduler<DataType>::scale_model_input(span<DataType> sample, int64_t ts) { /* no-op in case of PNDM */ }
 
 
-void PNDMScheduler::_get_prev_sample(span<Ort::Float16_t> sample, int64_t timestep, int64_t prev_timestep,
-                                     span<const Ort::Float16_t> model_output) {
+template<typename DataType>
+void PNDMScheduler<DataType>::_get_prev_sample(span<DataType> sample, int64_t timestep, int64_t prev_timestep,
+                                     span<const DataType> model_output) {
     // See formula(9) of PNDM paper https ://arxiv.org/pdf/2202.09778.pdf
     const auto alpha_prod_t = _alphas_cumprod[timestep];
     const float alpha_prod_t_prev = (prev_timestep >= 0) ? _alphas_cumprod[prev_timestep] : _final_alpha_cumprod;
@@ -210,19 +216,24 @@ void PNDMScheduler::_get_prev_sample(span<Ort::Float16_t> sample, int64_t timest
     // full formula(9)
     //    prev_sample = sample_coeff * sample - (alpha_prod_t_prev - alpha_prod_t) * model_output / model_output_denom_coeff
     for (const auto& [sample_val, model] : views::zip(sample, model_output)) {
-        const auto new_sample = sample_coeff * sample_val.ToFloat() - (alpha_prod_t_prev - alpha_prod_t) * model.ToFloat() / model_output_denom_coeff;
-        sample_val = Ort::Float16_t(new_sample);
+        const auto new_sample = sample_coeff * static_cast<float>(sample_val) - (alpha_prod_t_prev - alpha_prod_t) * static_cast<float>(model) / model_output_denom_coeff;
+        sample_val = DataType(new_sample);
     }
 }
 
 
-void PNDMScheduler::add_noise_to_sample(span<Ort::Float16_t> samples, span<const Ort::Float16_t> noise, int64_t timestep) {
+template<typename DataType>
+void PNDMScheduler<DataType>::add_noise_to_sample(span<DataType> samples, span<const DataType> noise, int64_t timestep) {
     const auto sqrt_alpha_prod = std::sqrt(_alphas_cumprod[timestep]);
     const auto sqrt_one_minus_alpha_prod = std::sqrt(1 - _alphas_cumprod[timestep]);
 
     //be cautious here, keeping in mind that pNoise may be equal to pNoisySamples
     for (const auto& [sample, noise] : views::zip(samples, noise)) {
-        const auto noisy_sample = sqrt_alpha_prod * sample.ToFloat() + sqrt_one_minus_alpha_prod * noise.ToFloat();
-        sample = Ort::Float16_t(noisy_sample);
+        const auto noisy_sample = sqrt_alpha_prod * static_cast<float>(sample) + sqrt_one_minus_alpha_prod * static_cast<float>(noise);
+        sample = DataType(noisy_sample);
     }
 }
+
+
+template PNDMScheduler<Ort::Float16_t>;
+template PNDMScheduler<float>;
