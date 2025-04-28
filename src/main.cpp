@@ -18,31 +18,13 @@
 
 using namespace std;
 
-
 static constexpr int64_t image_dim = 512;
 
 
 template<typename T>
 static consteval ONNXTensorElementDataType GetONNXType() {
     if constexpr (is_same_v<T, float>) return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
-    if constexpr (is_same_v<T, Ort::Float16_t>) ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
-}
-
-
-static void AddTensorRT(Ort::SessionOptions& session_options) {
-    OrtTensorRTProviderOptions options {};
-    options.device_id = 0;
-    options.trt_max_workspace_size = 2147483648;
-    options.trt_max_partition_iterations = 1000;
-    options.trt_min_subgraph_size = 1;
-    options.trt_fp16_enable = 1;
-    options.trt_int8_enable = 1;
-    options.trt_int8_use_native_calibration_table = 1;
-    options.trt_dump_subgraphs = 1;
-    // below options are strongly recommended !
-    options.trt_engine_cache_enable = 1;
-    options.trt_engine_cache_path = "I:/tensorrt_cache";
-    session_options.AppendExecutionProvider_TensorRT(options);
+    if constexpr (is_same_v<T, Ort::Float16_t>) return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
 }
 
 
@@ -50,8 +32,8 @@ template<integral... Idx>
 static constexpr pair<size_t, size_t> calc_slice(span<const int64_t> shape, Idx... idx) {
     const auto size = reduce(shape.begin() + sizeof...(Idx), shape.end(), 1LL, multiplies());
     size_t stride = size;
-    size_t offset = 0;
     size_t i = sizeof...(idx) - 1;
+    size_t offset = 0;
     (stride = ... = (offset += idx * stride, stride *= shape[i--]));
     return { offset, size };
 }
@@ -85,9 +67,8 @@ static Ort::Value CopyTensor(const Ort::Value& tensor, const Ort::AllocatorWithD
 
 template<typename T>
 static void RandomizeData(span<T> data) {
-    //std::random_device rd;
-    //std::mt19937 gen(rd());
-    std::mt19937 gen(1234);
+    std::random_device rd;
+    std::mt19937 gen(rd());
     std::normal_distribution<float> dist(0.f, 1.f);
 
     for (auto& val : data) val = static_cast<T>(dist(gen));
@@ -95,32 +76,26 @@ static void RandomizeData(span<T> data) {
 
 
 template<typename T>
-static void ConvertToImgAndSave(const Ort::Value& img, const string& filename) {
-    const auto data = TensorToSpan<T>(img, 0);
-    const auto shape = img.GetTensorTypeAndShapeInfo().GetShape();
-    const auto ch_size = shape[2] * shape[3];
-
-    vector<uint8_t> out_img(data.size());
-    for (const auto [ch, channel_pixels] : data | views::chunk(ch_size) | views::enumerate) {
-        for (const auto [idx, in] : channel_pixels | views::enumerate)
-            out_img[idx * shape[1] + ch] = static_cast<uint8_t>((static_cast<float>(in) + 1.f) * 127.5f);
-    }
-
-    stbi_write_png(filename.c_str(), static_cast<int>(shape[3]), static_cast<int>(shape[2]), static_cast<int>(shape[1]), out_img.data(), 0);
-}
-
-
-static void ConvertToImgAndSave(span<const float> img, int w, int h, int comps, const string& filename) {
+static void ConvertToImgAndSave(span<const T> img, int w, int h, int comps, const string& filename) {
     const auto ch_size = w * h;
 
     vector<uint8_t> out_img(img.size());
 
     for (const auto [ch, channel_pixels] : img | views::chunk(ch_size) | views::enumerate) {
-        for (const auto [idx, in] : channel_pixels | views::enumerate)
-            out_img[idx * comps + ch] = static_cast<uint8_t>((static_cast<float>(in) + 1.f) * 127.5f);
+        for (const auto [idx, in] : channel_pixels | views::enumerate) {
+            const auto rgb = round((static_cast<float>(in) + 1.f) * 127.5f);
+            out_img[idx * comps + ch] = static_cast<uint8_t>(clamp(rgb, .0f, 255.f));
+        }
     }
 
     stbi_write_png(filename.c_str(), w, h, comps, out_img.data(), 0);
+}
+
+
+template<typename T>
+static void ConvertToImgAndSave(const Ort::Value& img, const string& filename) {
+    const auto shape = img.GetTensorTypeAndShapeInfo().GetShape();
+    ConvertToImgAndSave(TensorToSpan<T>(img, 0), static_cast<int>(shape[3]), static_cast<int>(shape[2]), static_cast<int>(shape[1]), filename);
 }
 
 
@@ -136,7 +111,7 @@ static Ort::Value LoadImgAndConvertToTensor(const string& filename, int comps, c
     auto data = tensor.GetTensorMutableData<T>();
     const auto ch_size = width * height;
 
-    for (const auto [idx, in] : span(img, width * height * comps) | views::chunk(comps) | views::enumerate) {
+    for (const auto [idx, in] : span(img, ch_size * comps) | views::chunk(comps) | views::enumerate) {
         for (int64_t ch = 0; ch < comps; ++ch)
             data[ch * ch_size + idx] = static_cast<T>((in[ch] / 127.f) - 1.f);
     }
@@ -182,7 +157,6 @@ struct Model {
         println("Outputs:");
         const auto output_count = session.GetOutputCount();
         for (size_t i = 0; i < output_count; ++i) {
-            //Ort::MemoryInfo output_mem_info(name, OrtDeviceAllocator, 0, OrtMemTypeDefault);
             const auto output_mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
             const auto name = session.GetOutputNameAllocated(i, allocator);
             bindings.BindOutput(name.get(), output_mem_info);
@@ -194,7 +168,6 @@ struct Model {
     }
 
     vector<Ort::Value> Run(span<const char*> input_names, const vector<const Ort::Value*>& input_tensors, bool recreate_outputs = false) {
-        bindings.ClearBoundInputs();
         for (const auto& [name, value] : views::zip(input_names, input_tensors)) {
             bindings.BindInput(name, *value);
         }
@@ -228,7 +201,7 @@ struct Model {
 
 
 template<typename T>
-static void PadTokens(span<int32_t> padded, span<const T> input) {
+static void PadTokens(span<const T> input, span<int32_t> padded) {
     for (const auto& [converted, token] : views::zip(padded, input))
         converted = static_cast<int32_t>(token);
 
@@ -248,17 +221,10 @@ static Ort::Value TokenizeAndPadPrompt(const string& prompt, int64_t padded_size
     const vector<int64_t> prompt_shape { 2, padded_size };
     auto prompt_tensor = Ort::Value::CreateTensor(tokenizer.allocator, prompt_shape.data(), prompt_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
     
-    PadTokens(TensorToSpan<int32_t>(prompt_tensor, 0), TensorToSpan<int64_t>(tokenizer_output[0], 0));
-    PadTokens(TensorToSpan<int32_t>(prompt_tensor, 1), TensorToSpan<int64_t>(tokenizer_output[0], 1));
+    PadTokens(TensorToSpan<int64_t>(tokenizer_output[0], 0), TensorToSpan<int32_t>(prompt_tensor, 0));
+    PadTokens(TensorToSpan<int64_t>(tokenizer_output[0], 1), TensorToSpan<int32_t>(prompt_tensor, 1));
 
     return prompt_tensor;
-}
-
-
-template<typename T>
-static Ort::Value EncodePromptTokens(Model& text_encoder, const Ort::Value& tokens) {
-    const auto uncond_encoded = text_encoder.Run(text_encoder.input_names, { &tokens });
-    return CopyTensor<T>(uncond_encoded[0], text_encoder.allocator);
 }
 
 
@@ -285,16 +251,9 @@ static Ort::Value CreateLatents(Ort::AllocatorWithDefaultOptions& allocator, Mod
 
 
 template<typename T>
-static Ort::Value RunPrediction(Model& unet, const Ort::Value& latent, const Ort::Value& timestep, const Ort::Value& text_embeddings) {
-    const auto prediction = unet.Run(unet.input_names, { &latent, &timestep, &text_embeddings });
-    return CopyTensor<T>(prediction[0], unet.allocator);
-}
-
-
-template<typename T>
-static int run_inference(Model& tokenizer, Model& text_encoder, Model& unet, Model& vae_dec, Model& vae_enc) {
-    const auto prompt_tokens = TokenizeAndPadPrompt("Dog", 77, tokenizer);
-    const auto embeddings = EncodePromptTokens<T>(text_encoder, prompt_tokens);
+static void run_inference(Model& tokenizer, Model& text_encoder, Model& unet, Model& vae_dec, Model& vae_enc) {
+    const auto prompt_tokens = TokenizeAndPadPrompt("Woman. Photo.", 77, tokenizer);
+    const auto embeddings = text_encoder.Run(text_encoder.input_names, { &prompt_tokens });
 
     auto latent = CreateLatents<T>(unet.allocator, vae_enc);
     const auto latents = TensorToSpan<T>(latent, 0);
@@ -304,34 +263,40 @@ static int run_inference(Model& tokenizer, Model& text_encoder, Model& unet, Mod
     auto& timestep = timestep_tensor.GetTensorMutableData<int64_t>()[0];
 
     PNDMScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
+    //USTMScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, false, "epsilon", 1);
+    //EulerAScheduler<T> scheduler;
 
-    scheduler.set_timesteps(30);
-    const auto timesteps = scheduler.timesteps();
+    scheduler.set_timesteps(20);
+    auto timesteps = scheduler.timesteps();
     const float guidance_scale = 7.f;
 
-    for (const auto t : scheduler.timesteps()) {
+/*
+    const float strength = .5f;
+    timesteps = vector(timesteps.begin() + timesteps.size() * (1.f - strength), timesteps.end());
+
+    vector<T> noise(latents.size());
+    RandomizeData<T>(noise);
+    scheduler.add_noise_to_sample(latents, noise, timesteps[0]);
+*/
+
+    for (const auto t : timesteps) {
         timestep = t;
 
         scheduler.scale_model_input(latents, t);
 
         ranges::copy(TensorToSpan<T>(latent, 0), TensorToSpan<T>(latent, 1).data());
 
-        auto noise_predictions = RunPrediction<T>(unet, latent, timestep_tensor, embeddings);
-        const auto pred_uncond = TensorToSpan<T>(noise_predictions, 0);
-        auto pred_cond = TensorToSpan<T>(noise_predictions, 1);
+        auto noise_predictions = unet.Run(unet.input_names, { &latent, &timestep_tensor, &embeddings[0] });
+        const auto pred_uncond = TensorToSpan<T>(noise_predictions[0], 0);
+        auto pred_cond = TensorToSpan<T>(noise_predictions[0], 1);
 
         for (auto [np_cond, np_uncond] : views::zip(pred_cond, pred_uncond))
             np_cond = static_cast<T>(static_cast<float>(np_uncond) + guidance_scale * (static_cast<float>(np_cond) - static_cast<float>(np_uncond)));
 
         scheduler.step(pred_cond, t, latents);
-
-        //auto tmp = CopyTensor<T>(latent, unet.allocator);
-        //for (auto& v : TensorToSpan<T>(tmp)) v = static_cast<T>(static_cast<float>(v) / 0.18215f);
-        //const auto img = vae_dec.Run(vae_dec.input_names, { &tmp });
-        //ConvertToImgAndSave(img[0], format("out_{}.png", t));
     }
 
-    for (auto& v : latents) v = static_cast<T>(static_cast<float>(v) / 0.18215f);
+    for (auto& v : latents) v = static_cast<T>(static_cast<float>(v) * (1.f / 0.18215f));
     const auto img = vae_dec.Run(vae_dec.input_names, { &latent });
     ConvertToImgAndSave<T>(img[0], "out.png");
 
@@ -340,24 +305,20 @@ static int run_inference(Model& tokenizer, Model& text_encoder, Model& unet, Mod
 
 
 int main(int argc, char* argv[]) {
-    auto [off, sz] = calc_slice(vector<int64_t>{ 2,3,2 }, 1, 2);
-    tie(off, sz) = calc_slice(vector<int64_t>{ 2,3,4 }, 1, 2);
-    tie(off, sz) = calc_slice(vector<int64_t>{ 2,3,4,2 }, 1, 2, 1);
-
     try {
         println("Available providers: {}", Ort::GetAvailableProviders());
 
         Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "");
 
-        //const wstring root_dir = L"I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/";
-        const wstring root_dir = L"I:/huggingface/hub/models--CompVis--stable-diffusion-v1-4/snapshots/da5601014c467b382fcf42019ba920a903f2103e/";
+        const wstring root_dir = L"I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/";
+        //const wstring root_dir = L"I:/huggingface/hub/models--CompVis--stable-diffusion-v1-4/snapshots/da5601014c467b382fcf42019ba920a903f2103e/";
         Model tokenizer(env,    L"I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/tokenizer/model.onnx");
         Model text_encoder(env, root_dir + L"text_encoder/model.onnx");
         Model unet(env,         root_dir + L"unet/model.onnx");
         Model vae_encoder(env,  root_dir + L"vae_encoder/model.onnx");
         Model vae_decoder(env,  root_dir + L"vae_decoder/model.onnx");
 
-        run_inference<float>(tokenizer, text_encoder, unet, vae_decoder, vae_encoder);
+        run_inference<Ort::Float16_t>(tokenizer, text_encoder, unet, vae_decoder, vae_encoder);
     }
     catch (const Ort::Exception& e) {
         println("Exception ({}): {}", (int)e.GetOrtErrorCode(), e.what());
