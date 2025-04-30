@@ -10,20 +10,18 @@ using namespace std;
 static vector<float> linspace(float start, float end, size_t steps) {
     vector<float> res(steps);
 
-    for (size_t i = 0; i < steps; i++)
-        res[i] = (start + (steps - (steps - i)) * ((end - start) / (steps - 1)));
+    const auto step_size = (steps > 1) ? (end - start) / (steps - 1) : 0.f;
+    for (size_t i = 0; i < steps; i++) {
+        res[i] = (start + i * step_size);
+    }
 
     return res;
 }
 
 
-static vector<float> cumprod(vector<float>& input) {
-    vector<float> res = input;
-
-    for (size_t i = 1; i < res.size(); i++)
-        res[i] = res[i] * res[i - 1];
-
-    return res;
+static void make_cumprod(span<float> input) {
+    for (size_t i = 1; i < input.size(); i++)
+        input[i] *= input[i - 1];
 }
 
 
@@ -40,25 +38,24 @@ PNDMScheduler<DataType>::PNDMScheduler(size_t num_train_timesteps,
     : _num_train_timesteps(num_train_timesteps), steps_offset(steps_offset), _skip_prk_steps(skip_prk_steps), _prediction_type(prediction_type)
 {
     if (trained_betas) {
-        _betas = *trained_betas;
+        _alphas_cumprod = move(*trained_betas);
     }
     else if (beta_schedule == "linear") {
-        _betas = linspace(beta_start, beta_end, num_train_timesteps);
+        _alphas_cumprod = linspace(beta_start, beta_end, num_train_timesteps);
     }
     else if (beta_schedule == "scaled_linear") {
-        _betas = linspace(sqrt(beta_start), sqrt(beta_end), num_train_timesteps);
-        for (auto& b : _betas)
+        _alphas_cumprod = linspace(sqrt(beta_start), sqrt(beta_end), num_train_timesteps);
+        for (auto& b : _alphas_cumprod)
             b *= b;
     }
     else {
         throw invalid_argument(beta_schedule + "is not implemented for PNDMScheduler");
     }
 
-    _alphas = _betas;
-    for (auto& a : _alphas)
+    for (auto& a : _alphas_cumprod)
         a = 1.f - a;
 
-    _alphas_cumprod = cumprod(_alphas);
+    make_cumprod(_alphas_cumprod);
 
     if (set_alpha_to_one)
         _final_alpha_cumprod = 1.0f;
@@ -227,6 +224,75 @@ template PNDMScheduler<float>;
 
 
 
+
+template<typename DataType>
+EulerDiscreteScheduler<DataType>::EulerDiscreteScheduler(size_t num_train_timesteps,
+                                                         float beta_start,
+                                                         float beta_end,
+                                                         string beta_schedule,
+                                                         optional< vector<float> > trained_betas,
+                                                         bool skip_prk_steps,
+                                                         bool set_alpha_to_one,
+                                                         string prediction_type,
+                                                         size_t)
+    : _num_train_timesteps(num_train_timesteps), _prediction_type(prediction_type)
+{
+    vector<float> betas(num_train_timesteps);
+    for (int i = 0; i < num_train_timesteps; ++i)
+        betas[i] = beta_start + (beta_end - beta_start) * ((float)i / (num_train_timesteps - 1));
+
+    _alphas.resize(num_train_timesteps);
+    std::vector<float> alphas_squared(num_train_timesteps);
+    _sigmas.resize(num_train_timesteps);
+
+    float alpha_prod = 1.0f;
+    for (int i = 0; i < num_train_timesteps; ++i) {
+        float alpha = 1.0f - betas[i];
+        alpha_prod *= alpha;
+        _alphas[i] = std::sqrt(alpha_prod);
+        alphas_squared[i] = alpha_prod;
+        _sigmas[i] = std::sqrt(1.0f - alpha_prod);
+    }
+
+    _timesteps = { static_cast<int64_t>(num_train_timesteps - 1) };
+}
+
+
+template<typename DataType>
+void EulerDiscreteScheduler<DataType>::set_timesteps(size_t) {}
+
+
+template<typename DataType>
+void EulerDiscreteScheduler<DataType>::step(span<DataType> model_output, int64_t timestep, span<DataType> sample) {
+    const float alpha_t = _alphas[timestep];
+    const float sigma_t = _sigmas[timestep];
+
+    for (const auto& [sample_val, model] : views::zip(sample, model_output))
+        sample_val = DataType((static_cast<float>(sample_val) - (static_cast<float>(model) * sigma_t)) / alpha_t);
+}
+
+
+template<typename DataType>
+void EulerDiscreteScheduler<DataType>::add_noise_to_sample(span<DataType> samples, span<const DataType> noise, int64_t timestep) {}
+
+
+template<typename DataType>
+void EulerDiscreteScheduler<DataType>::scale_model_input(span<DataType> sample, int64_t ts) {}
+
+
+template EulerDiscreteScheduler<Ort::Float16_t>;
+template EulerDiscreteScheduler<float>;
+
+
+
+
+
+
+
+
+
+
+
 template<typename DataType>
 USTMScheduler<DataType>::USTMScheduler(size_t num_train_timesteps,
                                        float beta_start,
@@ -239,25 +305,24 @@ USTMScheduler<DataType>::USTMScheduler(size_t num_train_timesteps,
     : _num_train_timesteps(num_train_timesteps), steps_offset(steps_offset), _prediction_type(prediction_type)
 {
     if (trained_betas) {
-        _betas = *trained_betas;
+        _alphas_cumprod = move(*trained_betas);
     }
     else if (beta_schedule == "linear") {
-        _betas = linspace(beta_start, beta_end, num_train_timesteps);
+        _alphas_cumprod = linspace(beta_start, beta_end, num_train_timesteps);
     }
     else if (beta_schedule == "scaled_linear") {
-        _betas = linspace(sqrt(beta_start), sqrt(beta_end), num_train_timesteps);
-        for (auto& b : _betas)
+        _alphas_cumprod = linspace(sqrt(beta_start), sqrt(beta_end), num_train_timesteps);
+        for (auto& b : _alphas_cumprod)
             b *= b;
     }
     else {
         throw invalid_argument(beta_schedule + "is not implemented for USTMScheduler");
     }
 
-    _alphas = _betas;
-    for (auto& a : _alphas)
+    for (auto& a : _alphas_cumprod)
         a = 1.f - a;
 
-    _alphas_cumprod = cumprod(_alphas);
+    make_cumprod(_alphas_cumprod);
 
     if (set_alpha_to_one)
         _final_alpha_cumprod = 1.0f;
