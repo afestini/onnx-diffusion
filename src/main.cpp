@@ -15,6 +15,7 @@
 #include "stb_image_write.h"
 
 #include "pndmscheduler.h"
+#include "euler_discrete_scheduler.h"
 
 
 using namespace std;
@@ -27,6 +28,8 @@ template<typename T>
 static consteval ONNXTensorElementDataType GetONNXType() {
     if constexpr (is_same_v<T, float>) return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
     if constexpr (is_same_v<T, Ort::Float16_t>) return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+    if constexpr (is_same_v<T, int32_t>) return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+    if constexpr (is_same_v<T, int64_t>) return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
 }
 
 
@@ -67,13 +70,27 @@ static Ort::Value CopyTensor(const Ort::Value& tensor, const Ort::AllocatorWithD
 }
 
 
-template<typename T>
-static void RandomizeData(span<T> data, optional<uint32_t> seed = {}) {
+template<typename OldType, typename NewType>
+static Ort::Value ConvertTensor(const Ort::Value& tensor, const Ort::AllocatorWithDefaultOptions& allocator) {
+    const auto info = tensor.GetTensorTypeAndShapeInfo();
+    auto new_tensor = Ort::Value::CreateTensor(allocator,
+                                               info.GetShape().data(),
+                                               info.GetShape().size(),
+                                               GetONNXType<NewType>());
+    for (const auto& [in, out] : views::zip(TensorToSpan<OldType>(tensor), TensorToSpan<NewType>(new_tensor)))
+         out = static_cast<NewType>(in);
+
+    return new_tensor;
+}
+
+
+static void RandomizeData(span<float> data, float scale, optional<uint32_t> seed = {}) {
     std::random_device rd;
     std::mt19937 gen(seed ? *seed : rd());
     std::normal_distribution<float> dist(0.f, 1.f);
 
-    for (auto& val : data) val = static_cast<T>(dist(gen));
+    for (auto& val : data) val = dist(gen) * scale;
+    //ifstream("I:/tensordump_sigma.bin", ios::binary | ios::in).read((char*)data.data(), data.size_bytes());
 }
 
 
@@ -233,16 +250,17 @@ struct Model {
 };
 
 
-template<typename T>
-static void PadTokens(span<const T> input, span<int32_t> padded) {
+template<typename PaddedType>
+static void PadTokens(span<const int64_t> input, PaddedType pad_token, span<PaddedType> padded) {
     for (const auto& [converted, token] : views::zip(padded, input))
-        converted = static_cast<int32_t>(token);
+        converted = static_cast<PaddedType>(token);
 
-    ranges::fill(padded.subspan(input.size()), 49407);
+    ranges::fill(padded.subspan(input.size()), pad_token);
 }
 
 
-static Ort::Value TokenizeAndPadPrompt(const string& prompt, const string& neg_prompt, int64_t padded_size, Model& tokenizer) {
+template<typename PaddedType>
+static Ort::Value TokenizeAndPadPrompt(const string& prompt, const string& neg_prompt, int64_t padded_size, PaddedType pad_token, Model& tokenizer) {
     vector<const char*> prompts { neg_prompt.c_str(), prompt.c_str() };
     vector<int64_t> input_shape { ssize(prompts) };
 
@@ -252,41 +270,37 @@ static Ort::Value TokenizeAndPadPrompt(const string& prompt, const string& neg_p
     const auto tokenizer_output = tokenizer.Run(tokenizer.input_names, { &input_tensor }, true);
 
     const vector<int64_t> prompt_shape { 2, padded_size };
-    auto prompt_tensor = Ort::Value::CreateTensor(tokenizer.allocator, prompt_shape.data(), prompt_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    auto prompt_tensor = Ort::Value::CreateTensor(tokenizer.allocator, prompt_shape.data(), prompt_shape.size(), GetONNXType<PaddedType>());
 
-    PadTokens(TensorToSpan<int64_t>(tokenizer_output[0], 0), TensorToSpan<int32_t>(prompt_tensor, 0));
-    PadTokens(TensorToSpan<int64_t>(tokenizer_output[0], 1), TensorToSpan<int32_t>(prompt_tensor, 1));
+    PadTokens<PaddedType>(TensorToSpan<int64_t>(tokenizer_output[0], 0), pad_token, TensorToSpan<PaddedType>(prompt_tensor, 0));
+    PadTokens<PaddedType>(TensorToSpan<int64_t>(tokenizer_output[0], 1), pad_token, TensorToSpan<PaddedType>(prompt_tensor, 1));
 
     return prompt_tensor;
 }
 
 
 template<typename T>
-static Ort::Value CreateLatents(Ort::AllocatorWithDefaultOptions& allocator, Model& vae_encoder) {
+static Ort::Value CreateLatents(Ort::AllocatorWithDefaultOptions& allocator, Model& vae_encoder, float scale) {
     std::vector<int64_t> latent_shape = { 2, 4, image_h / 8, image_w / 8 };
     Ort::Value latent = Ort::Value::CreateTensor(allocator, latent_shape.data(), latent_shape.size(), GetONNXType<T>());
-    auto latent_data = TensorToSpan<T>(latent, 0);
-    if (true) {
-        RandomizeData<T>(latent_data);
-    }
-    else {
+    /*
         Ort::AllocatorWithDefaultOptions tmp_allocator;
         const auto image = LoadImgAndConvertToTensor<T>("input_512.png", 3, tmp_allocator);
         auto in_latent = vae_encoder.Run(vae_encoder.input_names, { &image });
         auto in_data = TensorToSpan<T>(in_latent[0]);
         for (auto& l : in_data)
-            l = static_cast<T>(static_cast<float>(l) * 0.18215f);
+            l = static_cast<T>(static_cast<float>(l) * scale);
 
-        ranges::copy(in_data, latent_data.data());
-    }
+        ranges::copy(in_data, TensorToSpan<T>(latent, 0).data());
+    */
     return latent;
 }
 
 
 template<typename T>
-class StaticDiffusion1Pipeline {
+class StableDiffusion1Pipeline {
 public:
-    StaticDiffusion1Pipeline(const Ort::Env& environment) : env(&environment) {}
+    StableDiffusion1Pipeline(const Ort::Env& environment) : env(&environment) {}
 
     void LoadModels(const wstring& root) {
         tokenizer.Load(*env, L"I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/tokenizer/model.onnx");
@@ -299,20 +313,24 @@ public:
     void Run(const string& pos_prompt, const string& neg_prompt, size_t steps, float cfg, int image_count = 1, optional<uint32_t> seed = {}) {
         const auto start_time = chrono::high_resolution_clock::now();
 
-        const auto prompt_tokens = TokenizeAndPadPrompt(pos_prompt, neg_prompt, 77, tokenizer);
+        PNDMScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
+        //EulerDiscreteScheduler2<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, "linear", "epsilon", 1);
+        //EulerDiscreteScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, false, false, "epsilon", 1);
+
+        scheduler.set_timesteps(steps);
+        const auto& timesteps = scheduler.timesteps();
+
+        const auto prompt_tokens = TokenizeAndPadPrompt<int32_t>(pos_prompt, neg_prompt, 77, 49407, tokenizer);
         const auto embeddings = text_encoder.Run(text_encoder.input_names, { &prompt_tokens });
 
-        auto latent = CreateLatents<T>(unet.allocator, vae_encoder);
-        const auto latents = TensorToSpan<T>(latent, 0);
+        auto unet_latent = CreateLatents<T>(unet.allocator, vae_encoder, (float)scheduler.init_noise_sigma());
+        const auto unet_latents = TensorToSpan<T>(unet_latent, 0);
+        vector<float> latent(unet_latents.size());
+        vector<float> noise_pred(unet_latents.size());
 
         std::vector<int64_t> ts_shape = { 1 };
         auto timestep_tensor = Ort::Value::CreateTensor(unet.allocator, ts_shape.data(), ts_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
         auto timestep = TensorToSpan<int64_t>(timestep_tensor);
-
-        PNDMScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
-
-        scheduler.set_timesteps(40);
-        auto timesteps = scheduler.timesteps();
 
         /*
             const float strength = .5f;
@@ -328,26 +346,26 @@ public:
         for (int i = 0; i < image_count; ++i) {
             const auto img_start_time = chrono::high_resolution_clock::now();
 
-            RandomizeData<T>(latents, seed);
+            RandomizeData(latent, scheduler.init_noise_sigma(), seed);
 
             for (const auto t : timesteps) {
                 timestep[0] = t;
-                scheduler.scale_model_input(latents, t);
 
-                ranges::copy(TensorToSpan<T>(latent, 0), TensorToSpan<T>(latent, 1).data());
+                scheduler.scale_model_input(latent, unet_latents, t);
+                ranges::copy(unet_latents, TensorToSpan<T>(unet_latent, 1).data());
 
-                auto noise_predictions = unet.Run(unet.input_names, { &latent, &timestep_tensor, &embeddings[0] });
+                auto noise_predictions = unet.Run(unet.input_names, { &unet_latent, &timestep_tensor, &embeddings[0] });
                 const auto pred_uncond = TensorToSpan<T>(noise_predictions[0], 0);
                 auto pred_cond = TensorToSpan<T>(noise_predictions[0], 1);
 
-                for (auto [np_cond, np_uncond] : views::zip(pred_cond, pred_uncond))
-                    np_cond = static_cast<T>(static_cast<float>(np_uncond) + cfg * (static_cast<float>(np_cond) - static_cast<float>(np_uncond)));
+                for (auto [np, np_cond, np_uncond] : views::zip(noise_pred, pred_cond, pred_uncond))
+                    np = static_cast<float>(np_uncond) + cfg * (static_cast<float>(np_cond) - static_cast<float>(np_uncond));
 
-                scheduler.step(pred_cond, t, latents);
+                scheduler.step(noise_pred, t, latent);
             }
 
-            for (auto& v : latents) v = static_cast<T>(static_cast<float>(v) * (1.f / 0.18215f));
-            const auto img = vae_decoder.Run(vae_decoder.input_names, { &latent });
+            for (const auto& [in, out] : views::zip(latent, unet_latents)) out = static_cast<T>(in * (1.f / 0.18215f));
+            const auto img = vae_decoder.Run(vae_decoder.input_names, { &unet_latent });
 
             println("Image generated in {}", chrono::duration_cast<chrono::milliseconds>(chrono::high_resolution_clock::now() - img_start_time));
 
@@ -365,10 +383,23 @@ private:
 };
 
 
+#include <fstream>
+
 template<typename T>
-class StaticDiffusionXLPipeline {
+void LoadTensor(const string& path, span<T> tensor) {
+    ifstream(path, ios::binary | ios::in).read((char*)tensor.data(), tensor.size_bytes());
+}
+
+template<typename T>
+void SaveTensor(const string& path, span<T> tensor) {
+    ofstream(path, ios::binary | ios::out).write((const char*)tensor.data(), tensor.size_bytes());
+}
+
+
+template<typename T>
+class StableDiffusionXLPipeline {
 public:
-    StaticDiffusionXLPipeline(const Ort::Env& environment) : env(&environment) {}
+    StableDiffusionXLPipeline(const Ort::Env& environment) : env(&environment) {}
 
     void LoadModels(const wstring& root) {
         tokenizer_1.Load(*env, root + L"tokenizer/model.onnx");
@@ -381,7 +412,93 @@ public:
     }
 
     void Run(const string& pos_prompt, const string& neg_prompt, size_t steps, float cfg, int image_count = 1, optional<uint32_t> seed = {}) {
+        const auto start_time = chrono::high_resolution_clock::now();
 
+        //PNDMScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
+        //EulerDiscreteScheduler2<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, "linear", "epsilon", 1);
+        EulerDiscreteScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
+        //EulerAncestralScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
+
+        scheduler.set_timesteps(steps);
+        const auto& timesteps = scheduler.timesteps();
+
+        const auto prompt_tokens_1 = TokenizeAndPadPrompt<int32_t>(pos_prompt, neg_prompt, 77, 49407, tokenizer_1);
+        const auto prompt_tokens_2 = TokenizeAndPadPrompt<int64_t>(pos_prompt, neg_prompt, 77, 0, tokenizer_2);
+        const auto embeddings_1 = text_encoder_1.Run(text_encoder_1.input_names, { &prompt_tokens_1 });
+        const auto embeddings_2 = text_encoder_2.Run(text_encoder_2.input_names, { &prompt_tokens_2 });
+
+        //embeddings_1[0] + embeddings[1]
+        std::vector<int64_t> concat_shape = { 2, 77, 2048 };
+        auto embeddings_concat = Ort::Value::CreateTensor(unet.allocator, concat_shape.data(), concat_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+        const auto emb1 = TensorToSpan<Ort::Float16_t>(embeddings_1[0]);
+        const auto emb2 = TensorToSpan<Ort::Float16_t>(embeddings_2[1]);
+        auto out = embeddings_concat.GetTensorMutableData<Ort::Float16_t>();
+        for (const auto& [in1, in2] : views::zip(views::chunk(emb1, 768), views::chunk(emb2, 1280))) {
+            for (Ort::Float16_t v : in1) *out++ = v;
+            for (Ort::Float16_t v : in2) *out++ = v;
+        }
+
+        auto unet_latent = CreateLatents<T>(unet.allocator, vae_encoder, (float)scheduler.init_noise_sigma());
+        const auto unet_latents = TensorToSpan<T>(unet_latent, 0);
+        vector<float> latent(unet_latents.size());
+        vector<float> noise_pred(unet_latents.size());
+
+        std::vector<int64_t> ts_shape = { 1 };
+        auto timestep_tensor = Ort::Value::CreateTensor(unet.allocator, ts_shape.data(), ts_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+        auto timestep = TensorToSpan<Ort::Float16_t>(timestep_tensor);
+
+        std::vector<int64_t> ti_shape = { 2, 6 };
+        auto time_ids = Ort::Value::CreateTensor(unet.allocator, ti_shape.data(), ti_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+        auto tids = TensorToSpan<Ort::Float16_t>(time_ids, 0);
+        tids[0] = Ort::Float16_t(512.f);
+        tids[1] = Ort::Float16_t(512.f);
+        tids[2] = Ort::Float16_t(0.f);
+        tids[3] = Ort::Float16_t(0.f);
+        tids[4] = Ort::Float16_t(512.f);
+        tids[5] = Ort::Float16_t(512.f);
+        ranges::copy(TensorToSpan<T>(time_ids, 0), TensorToSpan<T>(time_ids, 1).data());
+
+        println("Preparation time: {}", chrono::duration_cast<chrono::milliseconds>(chrono::high_resolution_clock::now() - start_time));
+
+        for (int i = 0; i < image_count; ++i) {
+            const auto img_start_time = chrono::high_resolution_clock::now();
+
+            RandomizeData(latent, scheduler.init_noise_sigma(), seed);
+            scheduler.reset();
+
+            for (const auto t : timesteps) {
+                timestep[0] = Ort::Float16_t(float(t));
+
+                scheduler.scale_model_input(latent, unet_latents, t);
+                ranges::copy(unet_latents, TensorToSpan<T>(unet_latent, 1).data());
+
+                auto noise_predictions = unet.Run(unet.input_names, { &unet_latent, &timestep_tensor, &embeddings_concat, &embeddings_2[0], &time_ids });
+                const auto pred_uncond = TensorToSpan<T>(noise_predictions[0], 0);
+                auto pred_cond = TensorToSpan<T>(noise_predictions[0], 1);
+
+                SaveTensor("I:/my_tensor_pred_cond.bin", pred_cond);
+                SaveTensor("I:/my_tensor_pred_uncond.bin", pred_uncond);
+
+                for (auto [np, np_cond, np_uncond] : views::zip(noise_pred, pred_cond, pred_uncond))
+                    np = static_cast<float>(np_uncond) + cfg * (static_cast<float>(np_cond) - static_cast<float>(np_uncond));
+
+                SaveTensor("I:/my_tensor_noise_pred.bin", pred_cond);
+                //LoadTensor("I:/tensordump_noise_pred.bin", pred_cond);
+                //LoadTensor("I:/tensordump_latents_step_0.bin", latents);
+
+                scheduler.step(noise_pred, t, latent);
+
+                //SaveTensor("I:/my_tensor_latents_step_1.bin", latents);
+                //LoadTensor("I:/tensordump_latents_step_1.bin", latents);
+            }
+
+            for (const auto& [in, out] : views::zip(latent, unet_latents)) out = static_cast<T>(in * (1.f / 0.13025f));
+            const auto img = vae_decoder.Run(vae_decoder.input_names, { &unet_latent });
+
+            println("Image generated in {}", chrono::duration_cast<chrono::milliseconds>(chrono::high_resolution_clock::now() - img_start_time));
+
+            ConvertToImgAndSave<T>(img[0], format("out_{:03}_steps{}_cfg{:02.1f}.png", i, timesteps.size(), cfg));
+        }
     }
 
 private:
@@ -403,18 +520,19 @@ int main(int argc, char* argv[]) {
 
         const auto start_time = chrono::high_resolution_clock::now();
 
-        StaticDiffusion1Pipeline<Ort::Float16_t> pipeline(env);
-        pipeline.LoadModels(L"I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/");
+        //StableDiffusion1Pipeline<Ort::Float16_t> pipeline(env);
+        //pipeline.LoadModels(L"I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/");
  
-       // StaticDiffusionXLPipeline<Ort::Float16_t> pipeline(env);
-       // pipeline.LoadModels(L"I:/huggingface/hub/models--onnxruntime--sdxl-turbo/snapshots/bd6180e5aa5a5e326fbb0ba1bdda15cb3817f63c/");
+        StableDiffusionXLPipeline<Ort::Float16_t> pipeline(env);
+        //pipeline.LoadModels(L"I:/huggingface/hub/models--tlwu--sdxl-turbo-onnxruntime/snapshots/ae6d79df2868cc8aee3e2c0bcfc8654e36d340b7/");
+        pipeline.LoadModels(L"I:/huggingface/hub/models--onnxruntime--sdxl-turbo/snapshots/bd6180e5aa5a5e326fbb0ba1bdda15cb3817f63c/");
 
         println("Models loaded in {}", chrono::duration_cast<chrono::milliseconds>(chrono::high_resolution_clock::now() - start_time));
 
         pipeline.Run("Woman, red hair, fit. Photo",
                      //"blurry, render, drawing, painting, art, cgi, deformed, wrong, weird",
                      "",
-                     40, 5.5f, 10);
+                     1, 1.f, 1, 1234);
     }
     catch (const Ort::Exception& e) {
         println("Exception ({}): {}", (int)e.GetOrtErrorCode(), e.what());
