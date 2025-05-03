@@ -1,157 +1,127 @@
 #pragma once
 
 #include <deque>
+#include <random>
 #include <span>
 #include <string>
 
 #include <onnxruntime_cxx_api.h>
 
 
-template<typename DataType>
-class PNDMScheduler {
+class Scheduler {
+public:
+    Scheduler(int64_t num_train_timesteps, int64_t steps_offset)
+        : _num_inference_steps(num_train_timesteps), _steps_offset(steps_offset) {}
+
+    virtual void set_timesteps(size_t num_inference_steps) = 0;
+
+    virtual void step(std::span<float> model_output, int64_t timestep, std::span<float> sample) = 0;
+
+    virtual void add_noise_to_sample(std::span<float> samples, int64_t timesteps) = 0;
+
+    virtual float scale_model_input_factor(int64_t ts) const { return 1.f; }
+
+    virtual void reset() {}
+
+    int64_t get_steps_offset() const { return _steps_offset; }
+
+    float init_noise_sigma() const { return _init_noise_sigma; }
+
+    const std::vector<int64_t>& timesteps() const { return _timesteps; }
+
+protected:
+    std::mt19937 rng { std::random_device()() };
+    std::normal_distribution<float> rng_dist { 0.f, 1.f };
+
+    std::vector<int64_t> _timesteps;
+    int64_t _num_train_timesteps = 1000;
+    int64_t _num_inference_steps = 0;
+    int64_t _steps_offset = 0;
+    float _init_noise_sigma = 1.0;
+};
+
+
+class PNDMScheduler : public Scheduler {
 public:
     PNDMScheduler(int64_t num_train_timesteps = 1000,
                   float beta_start = 0.0001f,
                   float beta_end = 0.002f,
                   std::string beta_schedule = "linear",
-                  std::optional<std::vector<float>> trained_betas = {},
                   bool skip_prk_steps = false,
                   bool set_alpha_to_one = false,
                   std::string prediction_type = "epsilon",
                   int64_t steps_offset = 0);
 
-    void reset();
+    void reset() override;
 
-    void set_timesteps(size_t num_inference_steps);
+    void set_timesteps(size_t num_inference_steps) override;
 
-    int64_t get_steps_offset() { return _steps_offset; }
+    void step(std::span<float> model_output, int64_t timestep, std::span<float> sample) override;
 
-    void step(std::span<float> model_output, int64_t timestep, std::span<float> sample);
-
-    void add_noise_to_sample(std::span<float> samples, std::span<const float> noise, int64_t timesteps);
-
-    void scale_model_input(std::span<const float> sample, std::span<DataType> model_input, int64_t ts);
-
-    float init_noise_sigma() const { return _init_noise_sigma; }
-
-    const std::vector<int64_t>& timesteps() { return _timesteps; }
+    void add_noise_to_sample(std::span<float> samples, int64_t timesteps) override;
 
 private:
     void step_plms(std::span<float> model_output, int64_t timestep, std::span<float> sample);
 
     void _get_prev_sample(std::span<float> sample, int64_t timestep, int64_t prev_timestep,
-                          std::span<const float> model_output);
+                          std::span<const float> model_output) const;
 
     std::vector<float> _alphas_cumprod;
     float _final_alpha_cumprod = 0.f;
-
-    std::vector<int64_t> _timesteps;
-
     std::deque<std::vector<float>> _ets;
+
     std::vector<float> _cur_sample;
-
     int64_t _counter = 0;
-
-    float _init_noise_sigma = 1.0;
     int _pndm_order = 4;
-
-    int64_t _num_inference_steps = 0;
-
-    int64_t _num_train_timesteps = 1000;
-    int64_t _steps_offset = 0;
-
-    bool _skip_prk_steps = false;
-
+     bool _skip_prk_steps = false;
     std::string _prediction_type;
 };
 
 
-
-
-
-template<typename DataType>
-class EulerDiscreteScheduler {
+class EulerDiscreteScheduler : public Scheduler {
 public:
     EulerDiscreteScheduler(size_t num_train_timesteps = 1000,
                            float beta_start = 0.0001f,
                            float beta_end = 0.002f,
                            std::string beta_schedule = "linear",
-                           std::optional< std::vector<float> > trained_betas = {},
                            bool skip_prk_steps = false,
                            bool set_alpha_to_one = false,
                            std::string prediction_type = "epsilon",
                            size_t steps_offset = 0);
 
-    void reset() {}
+    void set_timesteps(size_t num_inference_steps) override;
 
-    void set_timesteps(size_t num_inference_steps);
+    void step(std::span<float> model_output, int64_t timestep, std::span<float> sample) override;
 
-    size_t get_steps_offset() { return _steps_offset; }
+    void add_noise_to_sample(std::span<float> samples, int64_t timesteps) override;
 
-    void step(std::span<float> model_output, int64_t timestep, std::span<float> sample);
-
-    void add_noise_to_sample(std::span<float> samples, std::span<const float> noise, int64_t timesteps);
-
-    void scale_model_input(std::span<const float> in_sample, std::span<DataType> out_sample, int64_t ts);
-
-    float init_noise_sigma() { return _init_noise_sigma; }
-
-    const std::vector<int64_t>& timesteps() { return _timesteps; }
+    float scale_model_input_factor(int64_t ts) const override;
 
 private:
-    std::vector<float> _alphas_cumprod;
     std::vector<float> _sigmas;
-
-    std::vector<int64_t> _timesteps;
-    float _init_noise_sigma = 1.0;
-
-    size_t _num_train_timesteps = 1000;
-    size_t _num_inference_steps = 0;
-    size_t _steps_offset = 0;
 };
 
 
-
-
-
-template<typename DataType>
-class EulerAncestralScheduler {
+class EulerAncestralScheduler : public Scheduler {
 public:
     EulerAncestralScheduler(size_t num_train_timesteps = 1000,
                             float beta_start = 0.0001,
                             float beta_end = 0.002,
                             std::string beta_schedule = "linear",
-                            std::optional< std::vector<float> > trained_betas = {},
                             bool skip_prk_steps = false,
                             bool set_alpha_to_one = false,
                             std::string prediction_type = "epsilon",
                             size_t steps_offset = 0);
 
-    void reset() {}
+    void set_timesteps(size_t num_inference_steps) override;
 
-    void set_timesteps(size_t num_inference_steps);
+    void step(std::span<float> model_output, int64_t timestep, std::span<float> sample) override;
 
-    size_t get_steps_offset() { return 0; }
+    void add_noise_to_sample(std::span<float> samples, int64_t timesteps) override;
 
-    void step(std::span<float> model_output, int64_t timestep, std::span<float> sample);
-
-    void add_noise_to_sample(std::span<float> samples, std::span<const float> noise, int64_t timesteps);
-
-    void scale_model_input(std::span<const float> sample, std::span<DataType> model_input, int64_t ts);
-
-    float init_noise_sigma() { return _init_noise_sigma; }
-
-    const std::vector<int64_t>& timesteps() { return _timesteps; }
+    float scale_model_input_factor(int64_t ts) const override;
 
 private:
     std::vector<float> _sigmas;
-
-    std::vector<int64_t> _timesteps;
-    float _init_noise_sigma = 1.0;
-
-    size_t _num_inference_steps = 0;
-    size_t _num_train_timesteps = 1000;
-    size_t _steps_offset = 0;
-
     std::string _prediction_type;
 };

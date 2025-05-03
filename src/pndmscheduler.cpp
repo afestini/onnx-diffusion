@@ -24,29 +24,23 @@ static vector<T> linspace(float start, float end, size_t steps) {
 }
 
 
-template<typename T>
-static void make_cumprod(span<T> input) {
+static void make_cumprod(span<float> input) {
     for (size_t i = 1; i < input.size(); i++)
         input[i] *= input[i - 1];
 }
 
 
-template<typename DataType>
-PNDMScheduler<DataType>::PNDMScheduler(int64_t num_train_timesteps,
+PNDMScheduler::PNDMScheduler(int64_t num_train_timesteps,
                                        float beta_start,
                                        float beta_end,
                                        string beta_schedule,
-                                       optional<vector<float>> trained_betas,
                                        bool skip_prk_steps,
                                        bool set_alpha_to_one,
                                        string prediction_type,
                                        int64_t steps_offset)
-    : _num_train_timesteps(num_train_timesteps), _steps_offset(steps_offset), _skip_prk_steps(skip_prk_steps), _prediction_type(prediction_type)
+    : Scheduler(num_train_timesteps, steps_offset), _skip_prk_steps(skip_prk_steps), _prediction_type(prediction_type)
 {
-    if (trained_betas) {
-        _alphas_cumprod = move(*trained_betas);
-    }
-    else if (beta_schedule == "linear") {
+    if (beta_schedule == "linear") {
         _alphas_cumprod = linspace<float>(beta_start, beta_end, num_train_timesteps);
     }
     else if (beta_schedule == "scaled_linear") {
@@ -61,7 +55,7 @@ PNDMScheduler<DataType>::PNDMScheduler(int64_t num_train_timesteps,
     for (auto& a : _alphas_cumprod)
         a = 1.f - a;
 
-    make_cumprod<float>(_alphas_cumprod);
+    make_cumprod(_alphas_cumprod);
 
     if (set_alpha_to_one)
         _final_alpha_cumprod = 1.0f;
@@ -70,15 +64,13 @@ PNDMScheduler<DataType>::PNDMScheduler(int64_t num_train_timesteps,
 }
 
 
-template<typename DataType>
-void PNDMScheduler<DataType>::reset() {
+void PNDMScheduler::reset() {
     _ets.clear();
     _counter = 0;
 }
 
 
-template<typename DataType>
-void PNDMScheduler<DataType>::set_timesteps(size_t num_inference_steps) {
+void PNDMScheduler::set_timesteps(size_t num_inference_steps) {
     _num_inference_steps = num_inference_steps;
 
     vector<int64_t> tmp_timesteps;
@@ -109,8 +101,7 @@ void PNDMScheduler<DataType>::set_timesteps(size_t num_inference_steps) {
 }
 
 
-template<typename DataType>
-void PNDMScheduler<DataType>::step(span<float> model_output, int64_t timestep, span<float> sample) {
+void PNDMScheduler::step(span<float> model_output, int64_t timestep, span<float> sample) {
     if (!_skip_prk_steps) {
         throw invalid_argument("Not yet implemented step_prk method. Set skip_prk_steps to true for now.");
     }
@@ -120,8 +111,7 @@ void PNDMScheduler<DataType>::step(span<float> model_output, int64_t timestep, s
 }
 
 
-template<typename DataType>
-void PNDMScheduler<DataType>::step_plms(span<float> model_output, int64_t timestep, span<float> sample) {
+void PNDMScheduler::step_plms(span<float> model_output, int64_t timestep, span<float> sample) {
     if (_num_inference_steps == 0) {
         throw invalid_argument("Number of inference steps is 0, you need to run 'set_timesteps' after creating the scheduler");
     }
@@ -176,15 +166,7 @@ void PNDMScheduler<DataType>::step_plms(span<float> model_output, int64_t timest
 }
 
 
-template<typename DataType>
-void PNDMScheduler<DataType>::scale_model_input(span<const float> in_sample, span<DataType> out_sample, int64_t ts) {
-    for (const auto& [in, out] : views::zip(in_sample, out_sample))
-        out = DataType(in);
-}
-
-
-template<typename DataType>
-void PNDMScheduler<DataType>::_get_prev_sample(span<float> sample, int64_t timestep, int64_t prev_timestep, span<const float> model_output) {
+void PNDMScheduler::_get_prev_sample(span<float> sample, int64_t timestep, int64_t prev_timestep, span<const float> model_output) const {
     // See formula(9) of PNDM paper https ://arxiv.org/pdf/2202.09778.pdf
     const auto alpha_prod_t = _alphas_cumprod[timestep];
     const float alpha_prod_t_prev = (prev_timestep >= 0) ? _alphas_cumprod[prev_timestep] : _final_alpha_cumprod;
@@ -209,44 +191,34 @@ void PNDMScheduler<DataType>::_get_prev_sample(span<float> sample, int64_t times
 }
 
 
-template<typename DataType>
-void PNDMScheduler<DataType>::add_noise_to_sample(span<float> samples, span<const float> noise, int64_t timestep) {
+void PNDMScheduler::add_noise_to_sample(span<float> samples, int64_t timestep) {
     const auto sqrt_alpha_prod = sqrt(_alphas_cumprod[timestep]);
     const auto sqrt_one_minus_alpha_prod = sqrt(1 - _alphas_cumprod[timestep]);
 
-    for (const auto& [sample, noise] : views::zip(samples, noise))
-        sample = sqrt_alpha_prod * sample + sqrt_one_minus_alpha_prod * noise;
+    for (auto& sample : samples)
+        sample = sqrt_alpha_prod * sample + sqrt_one_minus_alpha_prod * rng_dist(rng);
 }
 
 
-template PNDMScheduler<Ort::Float16_t>;
-template PNDMScheduler<float>;
 
 
 
 
 
 
-
-
-template<typename DataType>
-EulerDiscreteScheduler<DataType>::EulerDiscreteScheduler(size_t num_train_timesteps,
-                                                         float beta_start,
-                                                         float beta_end,
-                                                         string beta_schedule,
-                                                         optional< vector<float> > trained_betas,
-                                                         bool skip_prk_steps,
-                                                         bool set_alpha_to_one,
-                                                         string,
-                                                         size_t steps_offset)
-    : _num_train_timesteps(num_train_timesteps), _steps_offset(steps_offset)
+EulerDiscreteScheduler::EulerDiscreteScheduler(size_t num_train_timesteps,
+                                               float beta_start,
+                                               float beta_end,
+                                               string beta_schedule,
+                                               bool skip_prk_steps,
+                                               bool set_alpha_to_one,
+                                               string,
+                                               size_t steps_offset)
+    : Scheduler(num_train_timesteps, steps_offset)
 {
     vector<float> betas;
 
-    if (trained_betas) {
-        betas = move(*trained_betas);
-    }
-    else if (beta_schedule == "linear") {
+    if (beta_schedule == "linear") {
         betas = linspace<float>(beta_start, beta_end, num_train_timesteps);
     }
     else if (beta_schedule == "scaled_linear") {
@@ -255,13 +227,11 @@ EulerDiscreteScheduler<DataType>::EulerDiscreteScheduler(size_t num_train_timest
             b *= b;
     }
 
-    _alphas_cumprod.reserve(num_train_timesteps);
     _sigmas.reserve(num_train_timesteps);
 
     float alpha_prod = 1.0f;
     for (const auto beta : betas) {
         alpha_prod *= (1.f - beta);
-        _alphas_cumprod.push_back(sqrt(alpha_prod));
         _sigmas.push_back(sqrt((1.0f - alpha_prod) / alpha_prod));
     }
 
@@ -269,8 +239,7 @@ EulerDiscreteScheduler<DataType>::EulerDiscreteScheduler(size_t num_train_timest
 }
 
 
-template<typename DataType>
-void EulerDiscreteScheduler<DataType>::set_timesteps(size_t num_inference_steps) {
+void EulerDiscreteScheduler::set_timesteps(size_t num_inference_steps) {
     _num_inference_steps = num_inference_steps;
 
     const size_t step_ratio = _num_train_timesteps / num_inference_steps;
@@ -281,8 +250,7 @@ void EulerDiscreteScheduler<DataType>::set_timesteps(size_t num_inference_steps)
 }
 
 
-template<typename DataType>
-void EulerDiscreteScheduler<DataType>::step(span<float> model_output, int64_t timestep, span<float> samples) {
+void EulerDiscreteScheduler::step(span<float> model_output, int64_t timestep, span<float> samples) {
     const int64_t prev_timestep = timestep - (_num_train_timesteps / _num_inference_steps);
 
     const auto sigma = _sigmas[timestep];
@@ -298,44 +266,34 @@ void EulerDiscreteScheduler<DataType>::step(span<float> model_output, int64_t ti
 }
 
 
-template<typename DataType>
-void EulerDiscreteScheduler<DataType>::add_noise_to_sample(span<float> samples, span<const float> noise, int64_t timestep) {}
-
-
-template<typename DataType>
-void EulerDiscreteScheduler<DataType>::scale_model_input(span<const float> in_sample, span<DataType> out_sample, int64_t ts) {
-    const float sigma = _sigmas[ts];
-    const auto factor = 1.f / sqrt(sigma * sigma + 1);
-    for (const auto& [in, out] : views::zip(in_sample, out_sample))
-        out = DataType(in * factor);
+void EulerDiscreteScheduler::add_noise_to_sample(span<float> samples, int64_t timestep) {
+    const auto sigma = _sigmas[timestep];
+    for (auto& sample : samples)
+        sample += rng_dist(rng) * sigma;
 }
 
 
-template EulerDiscreteScheduler<Ort::Float16_t>;
-template EulerDiscreteScheduler<float>;
+float EulerDiscreteScheduler::scale_model_input_factor(int64_t ts) const {
+    const float sigma = _sigmas[ts];
+    return 1.f / sqrt(sigma * sigma + 1);
+}
 
 
 
 
-
-template<typename DataType>
-EulerAncestralScheduler<DataType>::EulerAncestralScheduler(size_t num_train_timesteps,
-                                                           float beta_start,
-                                                           float beta_end,
-                                                           string beta_schedule,
-                                                           optional<vector<float>> trained_betas,
-                                                           bool skip_prk_steps,
-                                                           bool set_alpha_to_one,
-                                                           string prediction_type,
-                                                           size_t steps_offset)
-    : _num_train_timesteps(num_train_timesteps), _prediction_type(prediction_type), _steps_offset(steps_offset)
+EulerAncestralScheduler::EulerAncestralScheduler(size_t num_train_timesteps,
+                                                 float beta_start,
+                                                 float beta_end,
+                                                 string beta_schedule,
+                                                 bool skip_prk_steps,
+                                                 bool set_alpha_to_one,
+                                                 string prediction_type,
+                                                 size_t steps_offset)
+    : Scheduler(num_train_timesteps, steps_offset), _prediction_type(prediction_type)
 {
     vector<float> betas;
 
-    if (trained_betas) {
-        betas = move(*trained_betas);
-    }
-    else if (beta_schedule == "linear") {
+    if (beta_schedule == "linear") {
         betas = linspace<float>(beta_start, beta_end, num_train_timesteps);
     }
     else if (beta_schedule == "scaled_linear") {
@@ -357,8 +315,7 @@ EulerAncestralScheduler<DataType>::EulerAncestralScheduler(size_t num_train_time
 }
 
 
-template<typename DataType>
-void EulerAncestralScheduler<DataType>::set_timesteps(size_t num_inference_steps) {
+void EulerAncestralScheduler::set_timesteps(size_t num_inference_steps) {
     _num_inference_steps = num_inference_steps;
 
     _timesteps.clear();
@@ -380,12 +337,7 @@ void EulerAncestralScheduler<DataType>::set_timesteps(size_t num_inference_steps
 }
 
 
-template<typename DataType>
-void EulerAncestralScheduler<DataType>::step(span<float> model_output, int64_t timestep, span<float> samples) {
-    random_device rd;
-    mt19937 gen(rd());
-    normal_distribution<float> dist(0.f, 1.f);
-
+void EulerAncestralScheduler::step(span<float> model_output, int64_t timestep, span<float> samples) {
     const int64_t prev_timestep = timestep - (_num_train_timesteps / _num_inference_steps);
 
     // +1 to compensate for the inserted 0 at the start
@@ -402,23 +354,19 @@ void EulerAncestralScheduler<DataType>::step(span<float> model_output, int64_t t
     for (const auto& [sample, model] : views::zip(samples, model_output)) {
         const auto pred_org_sample = sample - sigma * model;
         const auto derivative = (sample - pred_org_sample) / sigma;
-        sample += dt * derivative + sigma_up * dist(gen);
+        sample += dt * derivative + sigma_up * rng_dist(rng);
     }
 }
 
 
-template<typename DataType>
-void EulerAncestralScheduler<DataType>::add_noise_to_sample(span<float> samples, span<const float> noise, int64_t timestep) {}
-
-
-template<typename DataType>
-void EulerAncestralScheduler<DataType>::scale_model_input(span<const float> in_sample, span<DataType> out_sample, int64_t ts) {
-    const float sigma = _sigmas[ts + 1];
-    const auto factor = 1.f / sqrt(sigma * sigma + 1);
-    for (const auto& [in, out] : views::zip(in_sample, out_sample))
-        out = DataType(in * factor);
+void EulerAncestralScheduler::add_noise_to_sample(span<float> samples, int64_t timestep) {
+    const auto sigma = _sigmas[timestep];
+    for (auto& sample : samples)
+        sample += rng_dist(rng) * sigma;
 }
 
 
-template EulerAncestralScheduler<Ort::Float16_t>;
-template EulerAncestralScheduler<float>;
+float EulerAncestralScheduler::scale_model_input_factor(int64_t ts) const {
+    const float sigma = _sigmas[ts + 1];
+    return 1.f / sqrt(sigma * sigma + 1);
+}
