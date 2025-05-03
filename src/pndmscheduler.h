@@ -143,7 +143,7 @@ public:
 
     const std::vector<int64_t>& timesteps() { return _timesteps; }
 
-//private:
+private:
     std::vector<float> _sigmas;
 
     std::vector<int64_t> _timesteps;
@@ -152,60 +152,6 @@ public:
     size_t _num_inference_steps = 0;
     size_t _num_train_timesteps = 1000;
     size_t _steps_offset = 0;
-
-    std::string _prediction_type;
-};
-
-
-
-
-
-
-template<typename DataType>
-class USTMScheduler {
-public:
-    USTMScheduler(size_t num_train_timesteps = 1000,
-                  float beta_start = 0.0001f,
-                  float beta_end = 0.002f,
-                  std::string beta_schedule = "linear",
-                  std::optional< std::vector<float> > trained_betas = {},
-                  bool set_alpha_to_one = false,
-                  std::string prediction_type = "epsilon",
-                  size_t steps_offset = 0);
-
-    void reset() {}
-
-    void set_timesteps(size_t num_inference_steps);
-
-    size_t get_steps_offset() { return steps_offset; }
-
-    void step(std::span<DataType> model_output, int64_t timestep, std::span<DataType> sample);
-
-    void add_noise_to_sample(std::span<DataType> samples, std::span<const DataType> noise, int64_t timesteps);
-
-    void scale_model_input(std::span<DataType> sample, int64_t ts);
-
-    float init_noise_sigma() { return _init_noise_sigma; }
-
-    const std::vector<int64_t>& timesteps() { return _timesteps; }
-
-private:
-    void _get_prev_sample(std::span<DataType> sample, int64_t timestep, int64_t prev_timestep,
-                          std::span<const DataType> model_output);
-
-    std::vector<float> _alphas_cumprod;
-    float _final_alpha_cumprod = 0.f;
-
-    std::vector<int64_t> _timesteps;
-
-    std::vector<int64_t> _plms_timesteps;
-
-    float _init_noise_sigma = 1.0;
-
-    size_t _num_inference_steps = 0;
-
-    size_t _num_train_timesteps;
-    size_t steps_offset;
 
     std::string _prediction_type;
 };

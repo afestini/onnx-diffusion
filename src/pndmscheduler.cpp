@@ -214,7 +214,6 @@ void PNDMScheduler<DataType>::add_noise_to_sample(span<float> samples, span<cons
     const auto sqrt_alpha_prod = sqrt(_alphas_cumprod[timestep]);
     const auto sqrt_one_minus_alpha_prod = sqrt(1 - _alphas_cumprod[timestep]);
 
-    //be cautious here, keeping in mind that pNoise may be equal to pNoisySamples
     for (const auto& [sample, noise] : views::zip(samples, noise))
         sample = sqrt_alpha_prod * sample + sqrt_one_minus_alpha_prod * noise;
 }
@@ -263,7 +262,6 @@ EulerDiscreteScheduler<DataType>::EulerDiscreteScheduler(size_t num_train_timest
     for (const auto beta : betas) {
         alpha_prod *= (1.f - beta);
         _alphas_cumprod.push_back(sqrt(alpha_prod));
-        //_sigmas.push_back(sqrt(1.0f - alpha_prod));
         _sigmas.push_back(sqrt((1.0f - alpha_prod) / alpha_prod));
     }
 
@@ -290,14 +288,11 @@ void EulerDiscreteScheduler<DataType>::step(span<float> model_output, int64_t ti
     const auto sigma = _sigmas[timestep];
     const auto sigma_prev = (prev_timestep >= 0) ? _sigmas[prev_timestep] : 0.f;
 
-    const float alpha_cumprod_t = _alphas_cumprod[timestep];
-    const float sigma_t = _sigmas[timestep];
-
     for (const auto& [sample, model] : views::zip(samples, model_output)) {
         const auto pred_original_sample = sample - sigma * model;
         const auto derivative = (sample - pred_original_sample) / sigma;
-
         const auto dt = sigma_prev - sigma;
+
         sample = sample + derivative * dt;
     }
 }
@@ -427,127 +422,3 @@ void EulerAncestralScheduler<DataType>::scale_model_input(span<const float> in_s
 
 template EulerAncestralScheduler<Ort::Float16_t>;
 template EulerAncestralScheduler<float>;
-
-
-
-
-
-
-
-
-
-
-
-template<typename DataType>
-USTMScheduler<DataType>::USTMScheduler(size_t num_train_timesteps,
-                                       float beta_start,
-                                       float beta_end,
-                                       string beta_schedule,
-                                       optional< vector<float> > trained_betas,
-                                       bool set_alpha_to_one,
-                                       string prediction_type,
-                                       size_t steps_offset)
-    : _num_train_timesteps(num_train_timesteps), steps_offset(steps_offset), _prediction_type(prediction_type)
-{
-    if (trained_betas) {
-        _alphas_cumprod = move(*trained_betas);
-    }
-    else if (beta_schedule == "linear") {
-        _alphas_cumprod = linspace<float>(beta_start, beta_end, num_train_timesteps);
-    }
-    else if (beta_schedule == "scaled_linear") {
-        _alphas_cumprod = linspace<float>(sqrt(beta_start), sqrt(beta_end), num_train_timesteps);
-        for (auto& b : _alphas_cumprod)
-            b *= b;
-    }
-    else {
-        throw invalid_argument(beta_schedule + "is not implemented for USTMScheduler");
-    }
-
-    for (auto& a : _alphas_cumprod)
-        a = 1.f - a;
-
-    make_cumprod<float>(_alphas_cumprod);
-
-    if (set_alpha_to_one)
-        _final_alpha_cumprod = 1.0f;
-    else
-        _final_alpha_cumprod = _alphas_cumprod[0];
-}
-
-
-template<typename DataType>
-void USTMScheduler<DataType>::set_timesteps(size_t num_inference_steps) {
-    _num_inference_steps = num_inference_steps;
-
-    const size_t step_ratio = _num_train_timesteps / num_inference_steps;
-
-    _timesteps.resize(num_inference_steps);
-    for (size_t i = 0; i < _timesteps.size(); i++)
-        _timesteps[i] = _num_train_timesteps - 1 - i * step_ratio;
-}
-
-
-template<typename DataType>
-void USTMScheduler<DataType>::step(span<DataType> model_output, int64_t timestep, span<DataType> sample) {
-    if (_num_inference_steps == 0) {
-        throw invalid_argument("Number of inference steps is 0, you need to run 'set_timesteps' after creating the scheduler");
-    }
-
-    int64_t prev_timestep = timestep - _num_train_timesteps / _num_inference_steps;
-    _get_prev_sample(sample, timestep, prev_timestep, model_output);
-}
-
-
-template<typename DataType>
-void USTMScheduler<DataType>::_get_prev_sample(span<DataType> samples,
-                                               int64_t timestep,
-                                               int64_t prev_timestep,
-                                               span<const DataType> model_output) {
-    // See formula(9) of PNDM paper https ://arxiv.org/pdf/2202.09778.pdf
-    const auto alpha_prod_t = _alphas_cumprod[timestep];
-    const float alpha_prod_t_prev = (prev_timestep >= 0) ? _alphas_cumprod[prev_timestep] : _final_alpha_cumprod;
-
-    const auto beta_prod_t = 1.f - alpha_prod_t;
-    const auto beta_prod_t_prev = 1.f - alpha_prod_t_prev;
-
-    if (_prediction_type == "v_prediction") {
-        throw invalid_argument("v_prediction case needs to be implemented.");
-    }
-    else if (_prediction_type != "epsilon") {
-        throw invalid_argument("prediction_type given as " + _prediction_type + " must be one of `epsilon` or `v_prediction`");
-    }
-
-    const auto sample_coeff = sqrt(alpha_prod_t_prev / alpha_prod_t);
-
-    const auto model_output_denom_coeff = alpha_prod_t * sqrt(beta_prod_t_prev) +
-                                          sqrt(alpha_prod_t * beta_prod_t * alpha_prod_t_prev);
-
-    // full formula(9)
-    //    prev_sample = sample_coeff * sample - (alpha_prod_t_prev - alpha_prod_t) * model_output / model_output_denom_coeff
-    for (const auto& [sample, model] : views::zip(samples, model_output)) {
-        const auto new_sample = sample_coeff * static_cast<float>(sample) - (alpha_prod_t_prev - alpha_prod_t) * static_cast<float>(model) / model_output_denom_coeff;
-        sample = DataType(new_sample);
-    }
-}
-
-
-template<typename DataType>
-void USTMScheduler<DataType>::add_noise_to_sample(span<DataType> samples, span<const DataType> noise, int64_t timestep) {
-    const auto sqrt_alpha_prod = sqrt(_alphas_cumprod[timestep]);
-    const auto sqrt_one_minus_alpha_prod = sqrt(1 - _alphas_cumprod[timestep]);
-
-    //be cautious here, keeping in mind that pNoise may be equal to pNoisySamples
-    for (const auto& [sample, noise] : views::zip(samples, noise)) {
-        const auto noisy_sample = sqrt_alpha_prod * static_cast<float>(sample) + sqrt_one_minus_alpha_prod * static_cast<float>(noise);
-        sample = DataType(noisy_sample);
-    }
-}
-
-
-template<typename DataType>
-void USTMScheduler<DataType>::scale_model_input(span<DataType> sample, int64_t ts) {}
-
-
-template USTMScheduler<Ort::Float16_t>;
-template USTMScheduler<float>;

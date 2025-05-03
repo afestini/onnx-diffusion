@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <chrono>
+#include <fstream>
 #include <iostream>
 #include <numeric>
 #include <print>
@@ -15,7 +16,6 @@
 #include "stb_image_write.h"
 
 #include "pndmscheduler.h"
-#include "euler_discrete_scheduler.h"
 
 
 using namespace std;
@@ -90,7 +90,6 @@ static void RandomizeData(span<float> data, float scale, optional<uint32_t> seed
     std::normal_distribution<float> dist(0.f, 1.f);
 
     for (auto& val : data) val = dist(gen) * scale;
-    //ifstream("I:/tensordump_sigma.bin", ios::binary | ios::in).read((char*)data.data(), data.size_bytes());
 }
 
 
@@ -313,9 +312,9 @@ public:
     void Run(const string& pos_prompt, const string& neg_prompt, size_t steps, float cfg, int image_count = 1, optional<uint32_t> seed = {}) {
         const auto start_time = chrono::high_resolution_clock::now();
 
-        PNDMScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
-        //EulerDiscreteScheduler2<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, "linear", "epsilon", 1);
+        //PNDMScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
         //EulerDiscreteScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, false, false, "epsilon", 1);
+        EulerAncestralScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, false, false, "epsilon", 1);
 
         scheduler.set_timesteps(steps);
         const auto& timesteps = scheduler.timesteps();
@@ -332,14 +331,6 @@ public:
         auto timestep_tensor = Ort::Value::CreateTensor(unet.allocator, ts_shape.data(), ts_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
         auto timestep = TensorToSpan<int64_t>(timestep_tensor);
 
-        /*
-            const float strength = .5f;
-            timesteps = vector(timesteps.begin() + timesteps.size() * (1.f - strength), timesteps.end());
-
-            vector<T> noise(latents.size());
-            RandomizeData<T>(noise);
-            scheduler.add_noise_to_sample(latents, noise, timesteps[0]);
-        */
 
         println("Preparation time: {}", chrono::duration_cast<chrono::milliseconds>(chrono::high_resolution_clock::now() - start_time));
 
@@ -347,6 +338,7 @@ public:
             const auto img_start_time = chrono::high_resolution_clock::now();
 
             RandomizeData(latent, scheduler.init_noise_sigma(), seed);
+            scheduler.reset();
 
             for (const auto t : timesteps) {
                 timestep[0] = t;
@@ -369,7 +361,7 @@ public:
 
             println("Image generated in {}", chrono::duration_cast<chrono::milliseconds>(chrono::high_resolution_clock::now() - img_start_time));
 
-            ConvertToImgAndSave<T>(img[0], format("out_{:03}_steps{}_cfg{:02.1f}.png", i, timesteps.size(), cfg));
+            ConvertToImgAndSave<T>(img[0], format("out_{:03}_steps{}_cfg{:02.1f}_{}.png", i, timesteps.size(), cfg, rand()));
         }
     }
 
@@ -383,7 +375,6 @@ private:
 };
 
 
-#include <fstream>
 
 template<typename T>
 void LoadTensor(const string& path, span<T> tensor) {
@@ -415,9 +406,8 @@ public:
         const auto start_time = chrono::high_resolution_clock::now();
 
         //PNDMScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
-        //EulerDiscreteScheduler2<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, "linear", "epsilon", 1);
-        EulerDiscreteScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
-        //EulerAncestralScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
+        //EulerDiscreteScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
+        EulerAncestralScheduler<T> scheduler(1000, 0.00085f, 0.012f, "scaled_linear", {}, true, false, "epsilon", 1);
 
         scheduler.set_timesteps(steps);
         const auto& timesteps = scheduler.timesteps();
@@ -476,20 +466,10 @@ public:
                 const auto pred_uncond = TensorToSpan<T>(noise_predictions[0], 0);
                 auto pred_cond = TensorToSpan<T>(noise_predictions[0], 1);
 
-                SaveTensor("I:/my_tensor_pred_cond.bin", pred_cond);
-                SaveTensor("I:/my_tensor_pred_uncond.bin", pred_uncond);
-
                 for (auto [np, np_cond, np_uncond] : views::zip(noise_pred, pred_cond, pred_uncond))
                     np = static_cast<float>(np_uncond) + cfg * (static_cast<float>(np_cond) - static_cast<float>(np_uncond));
 
-                SaveTensor("I:/my_tensor_noise_pred.bin", pred_cond);
-                //LoadTensor("I:/tensordump_noise_pred.bin", pred_cond);
-                //LoadTensor("I:/tensordump_latents_step_0.bin", latents);
-
                 scheduler.step(noise_pred, t, latent);
-
-                //SaveTensor("I:/my_tensor_latents_step_1.bin", latents);
-                //LoadTensor("I:/tensordump_latents_step_1.bin", latents);
             }
 
             for (const auto& [in, out] : views::zip(latent, unet_latents)) out = static_cast<T>(in * (1.f / 0.13025f));
@@ -497,7 +477,7 @@ public:
 
             println("Image generated in {}", chrono::duration_cast<chrono::milliseconds>(chrono::high_resolution_clock::now() - img_start_time));
 
-            ConvertToImgAndSave<T>(img[0], format("out_{:03}_steps{}_cfg{:02.1f}.png", i, timesteps.size(), cfg));
+            ConvertToImgAndSave<T>(img[0], format("out_{:03}_steps{}_cfg{:02.1f}_{}.png", i, timesteps.size(), cfg, rand()));
         }
     }
 
@@ -524,15 +504,13 @@ int main(int argc, char* argv[]) {
         //pipeline.LoadModels(L"I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/");
  
         StableDiffusionXLPipeline<Ort::Float16_t> pipeline(env);
-        //pipeline.LoadModels(L"I:/huggingface/hub/models--tlwu--sdxl-turbo-onnxruntime/snapshots/ae6d79df2868cc8aee3e2c0bcfc8654e36d340b7/");
-        pipeline.LoadModels(L"I:/huggingface/hub/models--onnxruntime--sdxl-turbo/snapshots/bd6180e5aa5a5e326fbb0ba1bdda15cb3817f63c/");
+        pipeline.LoadModels(L"I:/huggingface/hub/models--tlwu--sdxl-turbo-onnxruntime/snapshots/ae6d79df2868cc8aee3e2c0bcfc8654e36d340b7/");
 
         println("Models loaded in {}", chrono::duration_cast<chrono::milliseconds>(chrono::high_resolution_clock::now() - start_time));
 
         pipeline.Run("Woman, red hair, fit. Photo",
-                     //"blurry, render, drawing, painting, art, cgi, deformed, wrong, weird",
-                     "",
-                     1, 1.f, 1, 1234);
+                     "blurry, render, drawing, painting, art, cgi, deformed, wrong, weird",
+                     1, 1.f, 3, 1234);
     }
     catch (const Ort::Exception& e) {
         println("Exception ({}): {}", (int)e.GetOrtErrorCode(), e.what());
