@@ -30,15 +30,22 @@ static void make_cumprod(span<float> input) {
 }
 
 
+static int64_t get_prev_timestep(const vector<int64_t> timesteps, int64_t timestep) {
+    const auto it = ranges::upper_bound(timesteps, timestep, ranges::greater());
+    return it != timesteps.end() ? *it : -1;
+}
+
+
 PNDMScheduler::PNDMScheduler(int64_t num_train_timesteps,
-                                       float beta_start,
-                                       float beta_end,
-                                       string beta_schedule,
-                                       bool skip_prk_steps,
-                                       bool set_alpha_to_one,
-                                       string prediction_type,
-                                       int64_t steps_offset)
-    : Scheduler(num_train_timesteps, steps_offset), _skip_prk_steps(skip_prk_steps), _prediction_type(prediction_type)
+                             float beta_start,
+                             float beta_end,
+                             string beta_schedule,
+                             string timestep_spacing,
+                             bool skip_prk_steps,
+                             bool set_alpha_to_one,
+                             string prediction_type,
+                             int64_t steps_offset)
+    : Scheduler(num_train_timesteps, timestep_spacing, steps_offset), _skip_prk_steps(skip_prk_steps), _prediction_type(prediction_type)
 {
     if (beta_schedule == "linear") {
         _alphas_cumprod = linspace<float>(beta_start, beta_end, num_train_timesteps);
@@ -120,7 +127,7 @@ void PNDMScheduler::step_plms(span<float> model_output, int64_t timestep, span<f
         throw invalid_argument("an only be run AFTER scheduler has been run ");
     }
 
-    int64_t prev_timestep = timestep - _num_train_timesteps / _num_inference_steps;
+    int64_t prev_timestep = get_prev_timestep(_timesteps, timestep);
 
     if (_counter != 1) {
         while (_ets.size() > 3) _ets.pop_front();
@@ -210,11 +217,12 @@ EulerDiscreteScheduler::EulerDiscreteScheduler(size_t num_train_timesteps,
                                                float beta_start,
                                                float beta_end,
                                                string beta_schedule,
+                                               string timestep_spacing,
                                                bool skip_prk_steps,
                                                bool set_alpha_to_one,
                                                string,
                                                size_t steps_offset)
-    : Scheduler(num_train_timesteps, steps_offset)
+    : Scheduler(num_train_timesteps, timestep_spacing, steps_offset)
 {
     vector<float> betas;
 
@@ -234,24 +242,39 @@ EulerDiscreteScheduler::EulerDiscreteScheduler(size_t num_train_timesteps,
         alpha_prod *= (1.f - beta);
         _sigmas.push_back(sqrt((1.0f - alpha_prod) / alpha_prod));
     }
-
-    _init_noise_sigma = _sigmas.back(); // sqrt(_sigmas.back() * _sigmas.back() + 1);
 }
 
 
 void EulerDiscreteScheduler::set_timesteps(size_t num_inference_steps) {
     _num_inference_steps = num_inference_steps;
 
-    const size_t step_ratio = _num_train_timesteps / num_inference_steps;
+    _timesteps.clear();
+    _timesteps.reserve(num_inference_steps);
 
-    _timesteps.resize(num_inference_steps);
-    for (size_t i = 0; i < _timesteps.size(); i++)
-        _timesteps[i] = _num_train_timesteps - 1 - i * step_ratio;
+    if (_timestep_spacing == "linspace") {
+        _timesteps = linspace<int64_t>(0.f, static_cast<float>(_num_train_timesteps - 1), num_inference_steps) | views::reverse | ranges::to<vector>();
+    }
+    else if (_timestep_spacing == "leading") {
+        const int64_t step_ratio = _num_train_timesteps / num_inference_steps;
+        for (auto i : views::iota(0ULL, num_inference_steps) | views::reverse)
+            _timesteps.emplace_back(_steps_offset + i * step_ratio);
+    }
+    else if (_timestep_spacing == "trailing") {
+        const float step_ratio = static_cast<float>(_num_train_timesteps) / static_cast<float>(num_inference_steps);
+        float value = static_cast<float>(_num_train_timesteps) - 1.f;
+        while (value > 0.f) {
+            _timesteps.emplace_back(static_cast<int64_t>(round(value)));
+            value -= step_ratio;
+        }
+    }
+
+    _init_noise_sigma = _sigmas[_timesteps[0]];
+    _init_noise_sigma = sqrt(_init_noise_sigma * _init_noise_sigma + 1);
 }
 
 
 void EulerDiscreteScheduler::step(span<float> model_output, int64_t timestep, span<float> samples) {
-    const int64_t prev_timestep = timestep - (_num_train_timesteps / _num_inference_steps);
+    const int64_t prev_timestep = get_prev_timestep(_timesteps, timestep);
 
     const auto sigma = _sigmas[timestep];
     const auto sigma_prev = (prev_timestep >= 0) ? _sigmas[prev_timestep] : 0.f;
@@ -285,11 +308,12 @@ EulerAncestralScheduler::EulerAncestralScheduler(size_t num_train_timesteps,
                                                  float beta_start,
                                                  float beta_end,
                                                  string beta_schedule,
+                                                 string timestep_spacing,
                                                  bool skip_prk_steps,
                                                  bool set_alpha_to_one,
                                                  string prediction_type,
                                                  size_t steps_offset)
-    : Scheduler(num_train_timesteps, steps_offset), _prediction_type(prediction_type)
+    : Scheduler(num_train_timesteps, timestep_spacing, steps_offset), _prediction_type(prediction_type)
 {
     vector<float> betas;
 
@@ -310,8 +334,6 @@ EulerAncestralScheduler::EulerAncestralScheduler(size_t num_train_timesteps,
         alpha_prod *= (1.0f - beta);
         _sigmas.push_back(sqrt((1.0f - alpha_prod) / alpha_prod));
     }
-
-    _init_noise_sigma = _sigmas.back();
 }
 
 
@@ -321,24 +343,30 @@ void EulerAncestralScheduler::set_timesteps(size_t num_inference_steps) {
     _timesteps.clear();
     _timesteps.reserve(num_inference_steps);
 
-    // Spacing "leading"
-    if (false) {
+    if (_timestep_spacing == "linspace") {
+        _timesteps = linspace<int64_t>(0.f, static_cast<float>(_num_train_timesteps - 1), num_inference_steps) | views::reverse | ranges::to<vector>();
+    }
+    else if (_timestep_spacing == "leading") {
         const int64_t step_ratio = _num_train_timesteps / num_inference_steps;
         for (auto i : views::iota(0ULL, num_inference_steps) | views::reverse)
-            _timesteps.emplace_back(i * step_ratio + _steps_offset);
+            _timesteps.emplace_back(_steps_offset + i * step_ratio);
     }
-    // Spacing "trailing"
-    const float step_ratio = static_cast<float>(_num_train_timesteps) / static_cast<float>(num_inference_steps);
-    float value = static_cast<float>(_num_train_timesteps) - 1.f;
-    while (value > 0.f) {
-        _timesteps.emplace_back(static_cast<int64_t>(round(value)));
-        value -= step_ratio;
+    else if (_timestep_spacing == "trailing") {
+        const float step_ratio = static_cast<float>(_num_train_timesteps) / static_cast<float>(num_inference_steps);
+        float value = static_cast<float>(_num_train_timesteps) - 1.f;
+        while (value > 0.f) {
+            _timesteps.emplace_back(static_cast<int64_t>(round(value)));
+            value -= step_ratio;
+        }
     }
+
+    _init_noise_sigma = _sigmas[_timesteps[0]];
+    _init_noise_sigma = sqrt(_init_noise_sigma * _init_noise_sigma + 1);
 }
 
 
 void EulerAncestralScheduler::step(span<float> model_output, int64_t timestep, span<float> samples) {
-    const int64_t prev_timestep = timestep - (_num_train_timesteps / _num_inference_steps);
+    const int64_t prev_timestep = get_prev_timestep(_timesteps, timestep);
 
     // +1 to compensate for the inserted 0 at the start
     const auto sigma = _sigmas[timestep + 1];

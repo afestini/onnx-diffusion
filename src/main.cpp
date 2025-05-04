@@ -325,7 +325,7 @@ public:
         const auto start_time = chrono::high_resolution_clock::now();
 
         if (!scheduler)
-            scheduler = make_shared<PNDMScheduler>(1000, 0.00085f, 0.012f, "scaled_linear", true, false, "epsilon", 1);
+            scheduler = make_shared<PNDMScheduler>(1000, 0.00085f, 0.012f, "scaled_linear", "trailing", true, false, "epsilon", 1);
 
         scheduler->set_timesteps(steps);
         const auto& timesteps = scheduler->timesteps();
@@ -431,7 +431,7 @@ public:
         const auto start_time = chrono::high_resolution_clock::now();
 
         if (!scheduler)
-            scheduler = make_shared<EulerAncestralScheduler>(1000, 0.00085f, 0.012f, "scaled_linear", true, false, "epsilon", 1);
+            scheduler = make_shared<EulerAncestralScheduler>(1000, 0.00085f, 0.012f, "scaled_linear", "leading", true, false, "epsilon", 1);
 
         scheduler->set_timesteps(steps);
         const auto& timesteps = scheduler->timesteps();
@@ -496,7 +496,7 @@ public:
             scheduler->reset();
 
             // Scheduler loop
-            for (const auto t : timesteps) {
+            for (const auto t : views::drop(timesteps, start_timestep_idx)) {
                 timestep[0] = Ort::Float16_t(float(t));
 
                 const auto scale_factor = scheduler->scale_model_input_factor(t);
@@ -545,23 +545,24 @@ int main(int argc, char* argv[]) {
 
         const auto start_time = chrono::high_resolution_clock::now();
 
-        StableDiffusion1Pipeline<Ort::Float16_t> pipeline(env);
-        pipeline.LoadModels(L"I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/");
+        //StableDiffusion1Pipeline<Ort::Float16_t> pipeline(env);
+        //pipeline.LoadModels(L"I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/");
        
-        //StableDiffusionXLPipeline<Ort::Float16_t> pipeline(env);
-        //pipeline.LoadModels(L"I:/huggingface/hub/models--tlwu--sdxl-turbo-onnxruntime/snapshots/ae6d79df2868cc8aee3e2c0bcfc8654e36d340b7/");
+        StableDiffusionXLPipeline<Ort::Float16_t> pipeline(env);
+        pipeline.LoadModels(L"I:/huggingface/hub/models--onnxruntime--sdxl-turbo/snapshots/bd6180e5aa5a5e326fbb0ba1bdda15cb3817f63c/");
+        //pipeline.LoadModels(L"I:/huggingface/hub/models--tlwu--stable-diffusion-xl-base-1.0-onnxruntime/snapshots/621ce78dc071ee3b4407467df9800ba6b7673224/");
 
         println("Models loaded in {}", chrono::duration_cast<chrono::milliseconds>(chrono::high_resolution_clock::now() - start_time));
 
         //const auto scheduler = make_shared<PNDMScheduler>(1000, 0.00085f, 0.012f, "scaled_linear", true, false, "epsilon", 1);
-        //const auto scheduler = make_shared<EulerDiscreteScheduler>(1000, 0.00085f, 0.012f, "scaled_linear", true, false, "epsilon", 1);
-        const auto scheduler = make_shared<EulerAncestralScheduler>(1000, 0.00085f, 0.012f, "scaled_linear", true, false, "epsilon", 1);
+        //const auto scheduler = make_shared<EulerDiscreteScheduler>(1000, 0.00085f, 0.012f, "scaled_linear", "trailing", true, false, "epsilon", 1);
+        const auto scheduler = make_shared<EulerAncestralScheduler>(1000, 0.00085f, 0.012f, "scaled_linear", "trailing", true, false, "epsilon", 1);
 
         pipeline.SetScheduler(scheduler);
 
-        pipeline.Run("Cartoon, punk rock, Asian female guitarist, blonde short curly hair, green eyes, stocky build, small round glasses, no background.",
-                     "Background",
-                     40, 8.f, 3, {}, "input_512.png", .8f);
+        pipeline.Run("Videogame cartoon shaded render. Asian female punk rock guitarist, blonde short curly hair, stocky build, small round glasses. White background.",
+                     "Background. Text.",
+                     6, 2.f, 3, {});// , "input_512.png", .5f);
     }
     catch (const Ort::Exception& e) {
         println("Exception ({}): {}", (int)e.GetOrtErrorCode(), e.what());

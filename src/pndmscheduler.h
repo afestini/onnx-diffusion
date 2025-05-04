@@ -10,8 +10,8 @@
 
 class Scheduler {
 public:
-    Scheduler(int64_t num_train_timesteps, int64_t steps_offset)
-        : _num_inference_steps(num_train_timesteps), _steps_offset(steps_offset) {}
+    Scheduler(int64_t num_train_timesteps, std::string timestep_spacing, int64_t steps_offset)
+        : _num_train_timesteps(num_train_timesteps), _timestep_spacing(timestep_spacing), _steps_offset(steps_offset) {}
 
     virtual void set_timesteps(size_t num_inference_steps) = 0;
 
@@ -33,6 +33,7 @@ protected:
     std::mt19937 rng { std::random_device()() };
     std::normal_distribution<float> rng_dist { 0.f, 1.f };
 
+    std::string _timestep_spacing;
     std::vector<int64_t> _timesteps;
     int64_t _num_train_timesteps = 1000;
     int64_t _num_inference_steps = 0;
@@ -47,6 +48,7 @@ public:
                   float beta_start = 0.0001f,
                   float beta_end = 0.002f,
                   std::string beta_schedule = "linear",
+                  std::string timestep_spacing = "trailing",
                   bool skip_prk_steps = false,
                   bool set_alpha_to_one = false,
                   std::string prediction_type = "epsilon",
@@ -84,6 +86,7 @@ public:
                            float beta_start = 0.0001f,
                            float beta_end = 0.002f,
                            std::string beta_schedule = "linear",
+                           std::string timestep_spacing = "leading",
                            bool skip_prk_steps = false,
                            bool set_alpha_to_one = false,
                            std::string prediction_type = "epsilon",
@@ -108,6 +111,7 @@ public:
                             float beta_start = 0.0001,
                             float beta_end = 0.002,
                             std::string beta_schedule = "linear",
+                            std::string timestep_spacing = "trailing",
                             bool skip_prk_steps = false,
                             bool set_alpha_to_one = false,
                             std::string prediction_type = "epsilon",
