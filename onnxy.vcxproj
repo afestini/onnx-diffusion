@@ -137,11 +137,15 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\json.cpp" />
     <ClCompile Include="src\main.cpp" />
-    <ClCompile Include="src\pndmscheduler.cpp" />
+    <ClCompile Include="src\pipeline.cpp" />
+    <ClCompile Include="src\scheduler.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\pndmscheduler.h" />
+    <ClInclude Include="src\json.h" />
+    <ClInclude Include="src\pipeline.h" />
+    <ClInclude Include="src\scheduler.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

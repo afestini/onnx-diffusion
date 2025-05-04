@@ -4,7 +4,8 @@
 #include <ranges>
 #include <span>
 
-#include "pndmscheduler.h"
+#include "scheduler.h"
+#include "json.h"
 
 using namespace std;
 
@@ -36,27 +37,19 @@ static int64_t get_prev_timestep(const vector<int64_t> timesteps, int64_t timest
 }
 
 
-PNDMScheduler::PNDMScheduler(int64_t num_train_timesteps,
-                             float beta_start,
-                             float beta_end,
-                             string beta_schedule,
-                             string timestep_spacing,
-                             bool skip_prk_steps,
-                             bool set_alpha_to_one,
-                             string prediction_type,
-                             int64_t steps_offset)
-    : Scheduler(num_train_timesteps, timestep_spacing, steps_offset), _skip_prk_steps(skip_prk_steps), _prediction_type(prediction_type)
+PNDMScheduler::PNDMScheduler(const SchedulerConfig& cfg)
+    : Scheduler(cfg), _skip_prk_steps(cfg.skip_prk_steps), _prediction_type(cfg.prediction_type)
 {
-    if (beta_schedule == "linear") {
-        _alphas_cumprod = linspace<float>(beta_start, beta_end, num_train_timesteps);
+    if (cfg.beta_schedule == "linear") {
+        _alphas_cumprod = linspace<float>(cfg.beta_start, cfg.beta_end, cfg.num_train_timesteps);
     }
-    else if (beta_schedule == "scaled_linear") {
-        _alphas_cumprod = linspace<float>(sqrt(beta_start), sqrt(beta_end), num_train_timesteps);
+    else if (cfg.beta_schedule == "scaled_linear") {
+        _alphas_cumprod = linspace<float>(sqrt(cfg.beta_start), sqrt(cfg.beta_end), cfg.num_train_timesteps);
         for (auto& b : _alphas_cumprod)
             b *= b;
     }
     else {
-        throw invalid_argument(beta_schedule + "is not implemented for PNDMScheduler");
+        throw invalid_argument(cfg.beta_schedule + "is not implemented for PNDMScheduler");
     }
 
     for (auto& a : _alphas_cumprod)
@@ -64,10 +57,7 @@ PNDMScheduler::PNDMScheduler(int64_t num_train_timesteps,
 
     make_cumprod(_alphas_cumprod);
 
-    if (set_alpha_to_one)
-        _final_alpha_cumprod = 1.0f;
-    else
-        _final_alpha_cumprod = _alphas_cumprod[0];
+    _final_alpha_cumprod = cfg.set_alpha_to_one ? 1.0f : _alphas_cumprod[0];
 }
 
 
@@ -213,29 +203,21 @@ void PNDMScheduler::add_noise_to_sample(span<float> samples, int64_t timestep) {
 
 
 
-EulerDiscreteScheduler::EulerDiscreteScheduler(size_t num_train_timesteps,
-                                               float beta_start,
-                                               float beta_end,
-                                               string beta_schedule,
-                                               string timestep_spacing,
-                                               bool skip_prk_steps,
-                                               bool set_alpha_to_one,
-                                               string,
-                                               size_t steps_offset)
-    : Scheduler(num_train_timesteps, timestep_spacing, steps_offset)
+EulerDiscreteScheduler::EulerDiscreteScheduler(const SchedulerConfig& cfg)
+    : Scheduler(cfg)
 {
     vector<float> betas;
 
-    if (beta_schedule == "linear") {
-        betas = linspace<float>(beta_start, beta_end, num_train_timesteps);
+    if (cfg.beta_schedule == "linear") {
+        betas = linspace<float>(cfg.beta_start, cfg.beta_end, cfg.num_train_timesteps);
     }
-    else if (beta_schedule == "scaled_linear") {
-        betas = linspace<float>(sqrt(beta_start), sqrt(beta_end), num_train_timesteps);
+    else if (cfg.beta_schedule == "scaled_linear") {
+        betas = linspace<float>(sqrt(cfg.beta_start), sqrt(cfg.beta_end), cfg.num_train_timesteps);
         for (auto& b : betas)
             b *= b;
     }
 
-    _sigmas.reserve(num_train_timesteps);
+    _sigmas.reserve(cfg.num_train_timesteps);
 
     float alpha_prod = 1.0f;
     for (const auto beta : betas) {
@@ -269,7 +251,7 @@ void EulerDiscreteScheduler::set_timesteps(size_t num_inference_steps) {
     }
 
     _init_noise_sigma = _sigmas[_timesteps[0]];
-    _init_noise_sigma = sqrt(_init_noise_sigma * _init_noise_sigma + 1);
+    //_init_noise_sigma = sqrt(_init_noise_sigma * _init_noise_sigma + 1);
 }
 
 
@@ -304,29 +286,21 @@ float EulerDiscreteScheduler::scale_model_input_factor(int64_t ts) const {
 
 
 
-EulerAncestralScheduler::EulerAncestralScheduler(size_t num_train_timesteps,
-                                                 float beta_start,
-                                                 float beta_end,
-                                                 string beta_schedule,
-                                                 string timestep_spacing,
-                                                 bool skip_prk_steps,
-                                                 bool set_alpha_to_one,
-                                                 string prediction_type,
-                                                 size_t steps_offset)
-    : Scheduler(num_train_timesteps, timestep_spacing, steps_offset), _prediction_type(prediction_type)
+EulerAncestralScheduler::EulerAncestralScheduler(const SchedulerConfig& cfg)
+    : Scheduler(cfg), _prediction_type(cfg.prediction_type)
 {
     vector<float> betas;
 
-    if (beta_schedule == "linear") {
-        betas = linspace<float>(beta_start, beta_end, num_train_timesteps);
+    if (cfg.beta_schedule == "linear") {
+        betas = linspace<float>(cfg.beta_start, cfg.beta_end, cfg.num_train_timesteps);
     }
-    else if (beta_schedule == "scaled_linear") {
-        betas = linspace<float>(sqrt(beta_start), sqrt(beta_end), num_train_timesteps);
+    else if (cfg.beta_schedule == "scaled_linear") {
+        betas = linspace<float>(sqrt(cfg.beta_start), sqrt(cfg.beta_end), cfg.num_train_timesteps);
         for (auto& b : betas)
             b *= b;
     }
 
-    _sigmas.reserve(num_train_timesteps + 1);
+    _sigmas.reserve(cfg.num_train_timesteps + 1);
     _sigmas.push_back(0.f);
 
     float alpha_prod = 1.0f;
@@ -361,7 +335,7 @@ void EulerAncestralScheduler::set_timesteps(size_t num_inference_steps) {
     }
 
     _init_noise_sigma = _sigmas[_timesteps[0]];
-    _init_noise_sigma = sqrt(_init_noise_sigma * _init_noise_sigma + 1);
+    //_init_noise_sigma = sqrt(_init_noise_sigma * _init_noise_sigma + 1);
 }
 
 
@@ -397,4 +371,37 @@ void EulerAncestralScheduler::add_noise_to_sample(span<float> samples, int64_t t
 float EulerAncestralScheduler::scale_model_input_factor(int64_t ts) const {
     const float sigma = _sigmas[ts + 1];
     return 1.f / sqrt(sigma * sigma + 1);
+}
+
+
+
+SchedulerConfig LoadSchedulerConfig(const std::filesystem::path& config_file) {
+    SchedulerConfig cfg;
+    JsonParser parser;
+    const auto json = parser.Parse(config_file);
+    cfg.class_name = json["_class_name"].as<string>();
+    cfg.beta_end = json["beta_end"];
+    cfg.beta_start = json["beta_start"];
+    cfg.beta_schedule = json["beta_schedule"].as<string>();
+    cfg.num_train_timesteps = json["num_train_timesteps"];
+    cfg.prediction_type = json["prediction_type"].as<string>();
+    cfg.set_alpha_to_one = json["set_alpha_to_one"];
+    cfg.skip_prk_steps = json["skip_prk_steps"];
+    cfg.steps_offset = json["steps_offset"];
+    cfg.timestep_spacing = json["timestep_spacing"].as<string>();
+    return cfg;
+}
+
+
+std::shared_ptr<Scheduler> Scheduler::Create(const filesystem::path& config_file) {
+    const auto cfg = LoadSchedulerConfig(config_file);
+
+    if (cfg.class_name == "PNDMScheduler")
+        return make_shared<PNDMScheduler>(cfg);
+    else if (cfg.class_name == "EulerDiscreteScheduler")
+        return make_shared<EulerDiscreteScheduler>(cfg);
+    else if (cfg.class_name == "EulerAncestralScheduler")
+        return make_shared<EulerAncestralScheduler>(cfg);
+
+    return {};
 }

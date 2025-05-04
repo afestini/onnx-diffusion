@@ -1,17 +1,36 @@
 #pragma once
 
 #include <deque>
+#include <filesystem>
 #include <random>
 #include <span>
 #include <string>
 
-#include <onnxruntime_cxx_api.h>
+
+struct SchedulerConfig {
+    std::string class_name;
+    std::string prediction_type = "epsilon";
+    std::string timestep_spacing = "trailing";
+    std::string beta_schedule = "scaled_linear";
+    int64_t num_train_timesteps = 1000;
+    int64_t steps_offset = 0; 
+    float beta_start = .00085f;
+    float beta_end = .012f;
+    bool set_alpha_to_one = false;
+    bool skip_prk_steps = false;
+};
+
+SchedulerConfig LoadSchedulerConfig(const std::filesystem::path&);
 
 
 class Scheduler {
 public:
-    Scheduler(int64_t num_train_timesteps, std::string timestep_spacing, int64_t steps_offset)
-        : _num_train_timesteps(num_train_timesteps), _timestep_spacing(timestep_spacing), _steps_offset(steps_offset) {}
+    static std::shared_ptr<Scheduler> Create(const std::filesystem::path& config);
+
+    Scheduler(const SchedulerConfig& cfg)
+        : _num_train_timesteps(cfg.num_train_timesteps), _timestep_spacing(cfg.timestep_spacing), _steps_offset(cfg.steps_offset) {}
+
+    virtual ~Scheduler() = default;
 
     virtual void set_timesteps(size_t num_inference_steps) = 0;
 
@@ -44,15 +63,7 @@ protected:
 
 class PNDMScheduler : public Scheduler {
 public:
-    PNDMScheduler(int64_t num_train_timesteps = 1000,
-                  float beta_start = 0.0001f,
-                  float beta_end = 0.002f,
-                  std::string beta_schedule = "linear",
-                  std::string timestep_spacing = "trailing",
-                  bool skip_prk_steps = false,
-                  bool set_alpha_to_one = false,
-                  std::string prediction_type = "epsilon",
-                  int64_t steps_offset = 0);
+    PNDMScheduler(const SchedulerConfig&);
 
     void reset() override;
 
@@ -82,15 +93,7 @@ private:
 
 class EulerDiscreteScheduler : public Scheduler {
 public:
-    EulerDiscreteScheduler(size_t num_train_timesteps = 1000,
-                           float beta_start = 0.0001f,
-                           float beta_end = 0.002f,
-                           std::string beta_schedule = "linear",
-                           std::string timestep_spacing = "leading",
-                           bool skip_prk_steps = false,
-                           bool set_alpha_to_one = false,
-                           std::string prediction_type = "epsilon",
-                           size_t steps_offset = 0);
+    EulerDiscreteScheduler(const SchedulerConfig&);
 
     void set_timesteps(size_t num_inference_steps) override;
 
@@ -107,15 +110,7 @@ private:
 
 class EulerAncestralScheduler : public Scheduler {
 public:
-    EulerAncestralScheduler(size_t num_train_timesteps = 1000,
-                            float beta_start = 0.0001,
-                            float beta_end = 0.002,
-                            std::string beta_schedule = "linear",
-                            std::string timestep_spacing = "trailing",
-                            bool skip_prk_steps = false,
-                            bool set_alpha_to_one = false,
-                            std::string prediction_type = "epsilon",
-                            size_t steps_offset = 0);
+    EulerAncestralScheduler(const SchedulerConfig&);
 
     void set_timesteps(size_t num_inference_steps) override;
 
