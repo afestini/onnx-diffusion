@@ -143,6 +143,7 @@
     <ClCompile Include="src\scheduler.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="src\clip_tokenizer.h" />
     <ClInclude Include="src\json.h" />
     <ClInclude Include="src\pipeline.h" />
     <ClInclude Include="src\scheduler.h" />
