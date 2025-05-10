@@ -9,58 +9,32 @@
 #include "pipeline.h"
 #include "scheduler.h"
 
+
 using namespace std;
 
 
-string read_file(const string& filepath) {
-    auto file = fopen(filepath.c_str(), "rb");
-    if (!file) throw runtime_error("Could not open file: " + filepath);
-
-    fpos_t len {};
-    fseek(file, 0, SEEK_END);
-    fgetpos(file, &len);
-    fseek(file, 0, SEEK_SET);
-
-    string data;
-    data.resize(len);
-    fread(data.data(), 1, data.size(), file);
-    fclose(file);
-
-    return data;
-}
-
-
-#include "clip_tokenizer.h"
-
-
+#if 0
 
 int main() {
     try {
-        string vocab_file = "I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/tokenizer/vocab.json";
-        string merges_file = "I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/tokenizer/merges.txt";
+        string tokenizer_path = "I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/tokenizer/";
 
         // Benchmark Tokenizer Initialization
         const auto start_init = chrono::high_resolution_clock::now();
-        ClipTokenizer tokenizer(vocab_file, merges_file);
-        //AsciiClipTokenizer tokenizer(vocab_file, merges_file);
+
+        ClipTokenizer tokenizer(tokenizer_path);
+
         const auto end_init = chrono::high_resolution_clock::now();
         const auto init_duration = chrono::duration_cast<chrono::milliseconds>(end_init - start_init);
 
-        //println("Tokenizer initialized. Vocab size: {}, Merges: {}", tokenizer.vocab_to_id_.size(), tokenizer.merge_ranks_.size());
         println("Tokenizer initialization time: {}", init_duration);
 
         const string text = read_file("test.txt");
 
         // Benchmark Encoding
         const auto start_encode = chrono::high_resolution_clock::now();
-/*
-        size_t total_len = 0;
-        for (int i = 0; i < 10000; ++i)
-            total_len += tokenizer.encode(text, 77).size();
 
-        println("{}", total_len);
-*/
-        const auto token_ids = tokenizer.encode(text, 77);
+        const auto token_ids = tokenizer.encode(text);
 
         const auto end_encode = chrono::high_resolution_clock::now();
         const auto encode_duration = chrono::duration_cast<chrono::microseconds>(end_encode - start_encode);
@@ -85,63 +59,9 @@ int main() {
     return 0;
 }
 
-
-
-
-
-
-
-
-#if 0
+#else
 
 int main(int argc, char* argv[]) {
-    const auto merges_file = "I:/huggingface/hub/models--stabilityai--sdxl-turbo/snapshots/71153311d3dbb46851df1931d3ca6e939de83304/tokenizer/merges.txt";
-    ifstream file(merges_file, ios::ate);
-
-    if (!file)
-        return -1;
-
-    string test = "happy dire wolves go bananas for pineapple";
-    auto groups = views::transform(test, [](auto& c) {return string_view(&c, 1); }) | ranges::to<vector>();
-
-    const auto sz = file.tellg();
-    file.seekg(0, ios::beg);
-
-    vector<char> merges(sz);
-    file.read(merges.data(), sz);
-
-    const auto tok_start = chrono::steady_clock::now();
-
-    for (auto line : views::split(merges, '\n') | views::drop(1)) {
-        for (auto [a, b] : views::split(line, ' ') | views::transform([](const auto& e) { return string_view(e); }) | views::adjacent<2>) {
-            //println("{} - {}", a, b);
-            //for (const auto& [l, r] : views::filter(groups, [](const auto sv) {return !sv.empty(); }) | views::adjacent<2>) {
-            //    if (l == a && r == b) {
-            //        l = string_view(l.data(), l.size() + r.size());
-            //        r = {};
-            //    }
-            //}
-        }
-    }
-
-    println("{}", chrono::steady_clock::now() - tok_start);
-
-
-/*
-    
-    while (true) {
-        for (const auto& [l, r] : views::filter(groups, [](const auto sv) {return !sv.empty(); }) | views::adjacent<2>) {
-            l = string_view(l.data(), l.size() + r.size());
-            r = {};
-            break;
-        }
-    }
-*/
-
-
-
-
-
     try {
         Ort::Env env { ORT_LOGGING_LEVEL_WARNING, "" };
 
@@ -149,8 +69,8 @@ int main(int argc, char* argv[]) {
 
         const auto start_time = chrono::high_resolution_clock::now();
 
-        //const auto pipeline = Pipeline::Load(env, "I:/huggingface/hub/models--onnxruntime--sdxl-turbo/snapshots/bd6180e5aa5a5e326fbb0ba1bdda15cb3817f63c/");
-        const auto pipeline = Pipeline::Load(env, "I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/");
+        const auto pipeline = Pipeline::Load(env, "I:/huggingface/hub/models--onnxruntime--sdxl-turbo/snapshots/bd6180e5aa5a5e326fbb0ba1bdda15cb3817f63c/");
+        //const auto pipeline = Pipeline::Load(env, "I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/");
         //const auto pipeline = Pipeline::Load(env, "I:/huggingface/hub/models--tlwu--stable-diffusion-xl-base-1.0-onnxruntime/snapshots/621ce78dc071ee3b4407467df9800ba6b7673224/");
 
         println("Models loaded in {}", chrono::duration_cast<chrono::milliseconds>(chrono::high_resolution_clock::now() - start_time));
@@ -164,7 +84,7 @@ int main(int argc, char* argv[]) {
 
         pipeline->Run("Fantasy artwork of an Asian female punk rock guitarist with short blonde curly hair, stocky build, small round glasses",
                       "",
-                      50, 7.f, 3);// , {}, "input_512.png", .5f);
+                      4, 1.f, 3);// , {}, "input_512.png", .5f);
     }
     catch (const Ort::Exception& e) {
         println("Exception ({}): {}", (int)e.GetOrtErrorCode(), e.what());

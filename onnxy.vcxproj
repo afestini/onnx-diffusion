@@ -137,6 +137,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\clip_tokenizer.cpp" />
     <ClCompile Include="src\json.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\pipeline.cpp" />

@@ -44,7 +44,7 @@ public:
 	}
 
 	template<typename T>
-	T as(T fallback = {}) {
+	T as(T fallback = {}) const {
 		if constexpr (std::is_same_v<T, std::string>) return std::string(this->as<std::string_view>(fallback));
 		else return static_cast<T>(*this);
 	}

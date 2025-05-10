@@ -14,6 +14,7 @@
 
 #include "pipeline.h"
 #include "scheduler.h"
+#include "clip_tokenizer.h"
 #include "json.h"
 
 using namespace std;
@@ -252,29 +253,21 @@ struct Model {
 
 
 template<typename PaddedType>
-static void PadTokens(span<const int64_t> input, PaddedType pad_token, span<PaddedType> padded) {
-    for (const auto& [converted, token] : views::zip(padded, input))
+static Ort::Value TokenizePrompt(const string& prompt, const string& neg_prompt, ClipTokenizer& tokenizer,
+                                 Ort::AllocatorWithDefaultOptions& allocator) {
+    vector<const char*> prompts { neg_prompt.c_str(), prompt.c_str() };
+
+    const auto pos_tokens = tokenizer.Encode(prompt);
+    const auto neg_tokens = tokenizer.Encode(neg_prompt);
+
+    const vector<int64_t> prompt_shape { 2, ssize(pos_tokens) };
+    auto prompt_tensor = Ort::Value::CreateTensor(allocator, prompt_shape.data(), prompt_shape.size(), GetONNXType<PaddedType>());
+
+    for (const auto& [converted, token] : views::zip(TensorToSpan<PaddedType>(prompt_tensor, 0), neg_tokens))
         converted = static_cast<PaddedType>(token);
 
-    ranges::fill(padded.subspan(input.size()), pad_token);
-}
-
-
-template<typename PaddedType>
-static Ort::Value TokenizeAndPadPrompt(const string& prompt, const string& neg_prompt, int64_t padded_size, PaddedType pad_token, Model& tokenizer) {
-    vector<const char*> prompts { neg_prompt.c_str(), prompt.c_str() };
-    vector<int64_t> input_shape { ssize(prompts) };
-
-    auto input_tensor = Ort::Value::CreateTensor(tokenizer.allocator, input_shape.data(), input_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING);
-    input_tensor.FillStringTensor(prompts.data(), prompts.size());
-
-    const auto tokenizer_output = tokenizer.Run(tokenizer.input_names, { &input_tensor }, true);
-
-    const vector<int64_t> prompt_shape { 2, padded_size };
-    auto prompt_tensor = Ort::Value::CreateTensor(tokenizer.allocator, prompt_shape.data(), prompt_shape.size(), GetONNXType<PaddedType>());
-
-    PadTokens<PaddedType>(TensorToSpan<int64_t>(tokenizer_output[0], 0), pad_token, TensorToSpan<PaddedType>(prompt_tensor, 0));
-    PadTokens<PaddedType>(TensorToSpan<int64_t>(tokenizer_output[0], 1), pad_token, TensorToSpan<PaddedType>(prompt_tensor, 1));
+    for (const auto& [converted, token] : views::zip(TensorToSpan<PaddedType>(prompt_tensor, 1), pos_tokens))
+        converted = static_cast<PaddedType>(token);
 
     return prompt_tensor;
 }
@@ -307,7 +300,7 @@ public:
     using Pipeline::Pipeline;
 
     void LoadModels(const filesystem::path& root) override {
-        tokenizer.Load(*env, L"I:/huggingface/hub/models--sharpbai--stable-diffusion-v1-5-onnx-cuda-fp16/snapshots/e2ca53a1d64f7d181660cf6670c507c04cd5d265/tokenizer/model.onnx");
+        tokenizer.Load(root/"tokenizer");
         text_encoder.Load(*env, root/"text_encoder/model.onnx");
         unet.Load(*env, root/"unet/model.onnx");
         vae_encoder.Load(*env, root/"vae_encoder/model.onnx");
@@ -326,7 +319,7 @@ public:
         const auto& timesteps = scheduler->timesteps();
 
         // Tokenize prompts
-        const auto prompt_tokens = TokenizeAndPadPrompt<int32_t>(pos_prompt, neg_prompt, 77, 49407, tokenizer);
+        const auto prompt_tokens = TokenizePrompt<int32_t>(pos_prompt, neg_prompt, tokenizer, text_encoder.allocator);
         const auto embeddings = text_encoder.Run(text_encoder.input_names, { &prompt_tokens });
 
         // Prepare latent tensor
@@ -390,7 +383,7 @@ public:
     }
 
 private:
-    Model tokenizer;
+    ClipTokenizer tokenizer;
     Model text_encoder;
     Model unet;
     Model vae_encoder;
@@ -404,8 +397,8 @@ public:
     using Pipeline::Pipeline;
 
     void LoadModels(const filesystem::path& root) override {
-        tokenizer_1.Load(*env, root/"tokenizer/model.onnx");
-        tokenizer_2.Load(*env, root/"tokenizer_2/model.onnx");
+        tokenizer_1.Load(root/"tokenizer");
+        tokenizer_2.Load(root/"tokenizer_2");
         text_encoder_1.Load(*env, root/"text_encoder/model.onnx");
         text_encoder_2.Load(*env, root/"text_encoder_2/model.onnx");
         unet.Load(*env, root/"unet/model.onnx");
@@ -425,8 +418,8 @@ public:
         const auto& timesteps = scheduler->timesteps();
 
         // Tokenize prompts
-        const auto prompt_tokens_1 = TokenizeAndPadPrompt<int32_t>(pos_prompt, neg_prompt, 77, 49407, tokenizer_1);
-        const auto prompt_tokens_2 = TokenizeAndPadPrompt<int64_t>(pos_prompt, neg_prompt, 77, 0, tokenizer_2);
+        const auto prompt_tokens_1 = TokenizePrompt<int32_t>(pos_prompt, neg_prompt, tokenizer_1, text_encoder_1.allocator);
+        const auto prompt_tokens_2 = TokenizePrompt<int64_t>(pos_prompt, neg_prompt, tokenizer_2, text_encoder_2.allocator);
         const auto embeddings_1 = text_encoder_1.Run(text_encoder_1.input_names, { &prompt_tokens_1 });
         const auto embeddings_2 = text_encoder_2.Run(text_encoder_2.input_names, { &prompt_tokens_2 });
 
@@ -514,8 +507,8 @@ public:
     }
 
 private:
-    Model tokenizer_1;
-    Model tokenizer_2;
+    ClipTokenizer tokenizer_1;
+    ClipTokenizer tokenizer_2;
     Model text_encoder_1;
     Model text_encoder_2;
     Model unet;

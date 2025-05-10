@@ -400,7 +400,7 @@ std::shared_ptr<Scheduler> Scheduler::Create(const filesystem::path& config_file
         return make_shared<PNDMScheduler>(cfg);
     else if (cfg.class_name == "EulerDiscreteScheduler")
         return make_shared<EulerDiscreteScheduler>(cfg);
-    else if (cfg.class_name == "EulerAncestralScheduler")
+    else if (cfg.class_name == "EulerAncestralDiscreteScheduler")
         return make_shared<EulerAncestralScheduler>(cfg);
 
     return {};
