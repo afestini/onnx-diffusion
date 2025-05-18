@@ -20,8 +20,8 @@
 using namespace std;
 
 
-static constexpr int64_t image_w = 512;
-static constexpr int64_t image_h = 512;
+static constexpr int64_t image_w = 1024;
+static constexpr int64_t image_h = 1024;
 
 
 template<typename T>
@@ -247,8 +247,6 @@ struct Model {
     vector<Ort::AllocatedStringPtr> input_name_ptrs;
     vector<const char*> input_names;
     vector<Ort::TypeInfo> input_types;
-
-    vector<Ort::Value> output_values;
 };
 
 
@@ -422,6 +420,106 @@ public:
         const auto prompt_tokens_2 = TokenizePrompt<int64_t>(pos_prompt, neg_prompt, tokenizer_2, text_encoder_2.allocator);
         const auto embeddings_1 = text_encoder_1.Run(text_encoder_1.input_names, { &prompt_tokens_1 });
         const auto embeddings_2 = text_encoder_2.Run(text_encoder_2.input_names, { &prompt_tokens_2 });
+
+        if (embeddings_1.size() != text_encoder_1.session.GetOutputCount() || embeddings_2.size() != text_encoder_2.session.GetOutputCount())
+            return;
+
+        // Concat prompt embeddings
+        vector<int64_t> concat_shape = { 2, 77, 2048 };
+        auto embeddings_concat = Ort::Value::CreateTensor(unet.allocator, concat_shape.data(), concat_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+        const auto emb1 = TensorToSpan<Ort::Float16_t>(embeddings_1[embeddings_1.size() - 2]);
+        const auto emb2 = TensorToSpan<Ort::Float16_t>(embeddings_2[embeddings_2.size() - 2]);
+        auto out = embeddings_concat.GetTensorMutableData<Ort::Float16_t>();
+        for (const auto& [in1, in2] : views::zip(views::chunk(emb1, 768), views::chunk(emb2, 1280))) {
+            for (Ort::Float16_t v : in1) *out++ = v;
+            for (Ort::Float16_t v : in2) *out++ = v;
+        }
+
+        // Prepare latent tensor
+        auto unet_latent = CreateLatents<T>(unet.allocator, vae_encoder, scheduler->init_noise_sigma());
+        const auto unet_latents = TensorToSpan<T>(unet_latent, 0);
+        vector<float> latent(unet_latents.size());
+        vector<float> noise_pred(unet_latents.size());
+        vector<float> init_img;
+
+        if (!img.empty()) LoadAndEncodeImg<T>("input_512.png", vae_encoder, 0.18215f, init_img);
+
+        // Prepare timestep tensor
+        vector<int64_t> ts_shape = { 1 };
+        auto timestep_tensor = Ort::Value::CreateTensor(unet.allocator, ts_shape.data(), ts_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+        auto timestep = TensorToSpan<Ort::Float16_t>(timestep_tensor);
+
+        // Prepare time ids tensor
+        vector<int64_t> ti_shape = { 2, 6 };
+        auto time_ids = Ort::Value::CreateTensor(unet.allocator, ti_shape.data(), ti_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+        auto tids = TensorToSpan<Ort::Float16_t>(time_ids, 0);
+        tids[0] = Ort::Float16_t(static_cast<float>(image_h));
+        tids[1] = Ort::Float16_t(static_cast<float>(image_w));
+        tids[2] = Ort::Float16_t(0.f);
+        tids[3] = Ort::Float16_t(0.f);
+        tids[4] = Ort::Float16_t(static_cast<float>(image_h));
+        tids[5] = Ort::Float16_t(static_cast<float>(image_w));
+        ranges::copy(TensorToSpan<T>(time_ids, 0), TensorToSpan<T>(time_ids, 1).data());
+
+        println("Preparation time: {}", chrono::duration_cast<chrono::milliseconds>(chrono::high_resolution_clock::now() - start_time));
+
+        for (int i = 0; i < image_count; ++i) {
+            const auto img_start_time = chrono::high_resolution_clock::now();
+
+            int start_timestep_idx = 0;
+            if (init_img.empty()) {
+                RandomizeData(latent, scheduler->init_noise_sigma(), seed);
+            }
+            else {
+                start_timestep_idx = static_cast<int>(round((1.f - denoise_strength) * static_cast<float>(timesteps.size())));
+                ranges::copy(init_img, latent.data());
+                scheduler->add_noise_to_sample(latent, timesteps[start_timestep_idx]);
+            }
+            scheduler->reset();
+
+            // Scheduler loop
+            for (const auto t : views::drop(timesteps, start_timestep_idx)) {
+                timestep[0] = Ort::Float16_t(float(t));
+
+                const auto scale_factor = scheduler->scale_model_input_factor(t);
+                for (const auto& [in, out] : views::zip(latent, unet_latents))
+                    out = T(in * scale_factor);
+
+                ranges::copy(unet_latents, TensorToSpan<T>(unet_latent, 1).data());
+
+                auto noise_predictions = unet.Run(unet.input_names, { &unet_latent, &timestep_tensor, &embeddings_concat, &embeddings_2[0], &time_ids });
+                const auto pred_uncond = TensorToSpan<T>(noise_predictions[0], 0);
+                auto pred_cond = TensorToSpan<T>(noise_predictions[0], 1);
+
+                for (auto [np, np_cond, np_uncond] : views::zip(noise_pred, pred_cond, pred_uncond))
+                    np = static_cast<float>(np_uncond) + cfg * (static_cast<float>(np_cond) - static_cast<float>(np_uncond));
+
+                scheduler->step(noise_pred, t, latent);
+            }
+
+            // Scale, decode and save image
+            for (const auto& [in, out] : views::zip(latent, unet_latents)) out = static_cast<T>(in * (1.f / 0.13025f));
+
+            //ifstream("I:/onnx-conv/vae_in_latent.bin", ios::binary).read((char*)unet_latents.data(), unet_latents.size_bytes());
+
+            const auto img = vae_decoder.Run(vae_decoder.input_names, { &unet_latent });
+
+            println("Image generated in {}", chrono::duration_cast<chrono::milliseconds>(chrono::high_resolution_clock::now() - img_start_time));
+
+            ConvertToImgAndSave<T>(img[0], format("out_{:03}_steps{}_cfg{:02.1f}.png", i, timesteps.size(), cfg));
+        }
+    }
+
+private:
+    ClipTokenizer tokenizer_1;
+    ClipTokenizer tokenizer_2;
+    Model text_encoder_1;
+    Model text_encoder_2;
+    Model unet;
+    Model vae_encoder;
+    Model vae_decoder;
+};
+
 
         // Concat prompt embeddings
         vector<int64_t> concat_shape = { 2, 77, 2048 };
